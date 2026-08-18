@@ -31,7 +31,7 @@ You need:
 ## Run it
 
 ```bash
-git clone https://github.com/AbsoluteOps/lensix-inventory
+git clone https://github.com/LensixScanner/lensix-inventory
 cd lensix-inventory
 ./run.sh
 ```
