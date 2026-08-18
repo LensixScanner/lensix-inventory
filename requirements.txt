@@ -1,0 +1,6 @@
+# Installs dependencies for all three providers. If you only need one,
+# install requirements-aws.txt / requirements-azure.txt / requirements-gcp.txt
+# instead — ./run.sh does this automatically.
+-r requirements-aws.txt
+-r requirements-azure.txt
+-r requirements-gcp.txt

@@ -1,0 +1,56 @@
+"""Microsoft Defender for Cloud gathering — subscription pricing plans and
+the network interfaces IP-forwarding evaluation needs.
+
+Two plain list calls cover every Defender-related finding:
+
+- `SecurityCenter.pricings.list()` — subscription-wide Defender plan tiers
+  (App Services, Azure SQL, Containers, Key Vault, Kubernetes, Servers,
+  Storage). "Plan missing" vs. "plan present but Free tier" is finding
+  evaluation over this same list, left server-side — Lensix can recompute
+  it from the raw `Pricing` records gathered here.
+- `NetworkManagementClient.network_interfaces.list_all()` — used for
+  flagging NICs with `enable_ip_forwarding` set. Gathered as its own
+  `network_interface` resource (plain list call, not evaluation); if
+  another module in this tool also gathers NICs, Lensix's import can
+  dedupe by resource_id/resource_type.
+
+Both pricing plans and NICs are ordinary listable ARM resources with their
+own id/name, gathered here as `defender_pricing` and `network_interface`
+resources so Lensix can evaluate Defender-related findings server-side
+from an uploaded inventory file.
+"""
+
+from azure.mgmt.network import NetworkManagementClient
+from azure.mgmt.security import SecurityCenter
+from ._util import resource_group as _resource_group, as_dict as _as_dict
+
+
+def get_pricings(credential, subscription_id):
+    security_client = SecurityCenter(credential, subscription_id)
+    return list(security_client.pricings.list())
+
+
+def get_network_interfaces(credential, subscription_id):
+    network_client = NetworkManagementClient(credential, subscription_id)
+    return list(network_client.network_interfaces.list_all())
+
+
+def gather(credential, subscription_id, writer):
+    for pricing in get_pricings(credential, subscription_id):
+        writer.add_resource(
+            resource_type='defender_pricing',
+            region='global',
+            resource_id=pricing.id,
+            resource_name=pricing.name,
+            raw=_as_dict(pricing),
+        )
+
+    for nic in get_network_interfaces(credential, subscription_id):
+        writer.add_resource(
+            resource_type='network_interface',
+            region=nic.location or 'global',
+            resource_id=nic.id,
+            resource_name=nic.name,
+            scope_id=_resource_group(nic.id),
+            raw=_as_dict(nic),
+        )
