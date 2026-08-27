@@ -39,7 +39,16 @@ def gather(credential, subscription_id, writer):
 
         endpoints_raw = []
         if rg:
-            for endpoint in get_endpoints(credential, subscription_id, rg, profile.name):
+            try:
+                endpoints = get_endpoints(credential, subscription_id, rg, profile.name)
+            except Exception as e:
+                # Isolated per-profile — a failure fetching one profile's
+                # endpoints must not abort every other profile in this
+                # subscription.
+                writer.add_error(region=profile.location or 'global',
+                                  source=f'cdn:endpoints:{profile.name}', message=e)
+                endpoints = []
+            for endpoint in endpoints:
                 endpoint_raw = _as_dict(endpoint)
                 endpoint_raw['_DiagnosticSettings'] = get_diagnostic_settings(
                     credential, subscription_id, endpoint.id

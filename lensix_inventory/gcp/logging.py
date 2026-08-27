@@ -19,22 +19,31 @@ can recompute the same substring-match correlation server-side, the same
 way aws/sg.py's docstring describes recomputing "is this SG referenced
 anywhere" from the union of uploaded resources.
 
-Audit-config data (`auditConfigs` from the project's IAM policy) is
-deliberately NOT re-fetched here even though audit-logging evaluation
-needs it — iam.py already gathers the exact same getIamPolicy response as
-its `iam_policy` resource, so fetching it a second time here would just
-upload the same data twice under a different resource_type. Lensix can
-evaluate both this module's and iam.py's audit-logging checks from that
-one `iam_policy` record.
+Audit-config data (`auditConfigs` from the project's IAM policy) IS
+gathered here now too, via iam.py's own get_iam_policy() (reused
+directly, not the whole iam.py gather(), which would also fetch service
+accounts and workload identity pools this module doesn't need) — merged
+into the SAME `iam_policy` resource shape iam.py's own gather() produces
+(same resource_id: an upload that runs both modules together, as
+lensix-inventory-light's own full-account run() does, ends up with one
+iam_policy record either way; a live scan of just this module gets its
+own copy, an accepted duplicate live call — same tradeoff lb.py's dual
+target_group gather and account.py's cross-region root-usage re-fetch
+already established).
 
-Whether a log sink's destination bucket still exists requires a live
-existence-check API call against the destination — that's check-time
-verification, not resource gathering, so it isn't done here; the sink's
-raw `destination` field is uploaded as-is and Lensix can verify it
-server-side if desired.
+Whether a log sink's destination bucket still exists IS checked here too
+now (get_destination_bucket_exists) — a live existence-check call per
+sink with a storage.googleapis.com destination, merged into that sink's
+own raw['_DestinationBucketExists'] (True/False/None — None means
+"inconclusive," e.g. a 403 meaning the bucket exists but this credential
+can't see it, treated the same as the live check always has: not a
+dangling-sink finding).
 """
 
 from googleapiclient import discovery
+from googleapiclient.errors import HttpError
+
+from .iam import get_iam_policy
 
 
 def get_log_buckets(logging_api, project_id):
@@ -59,9 +68,33 @@ def get_alert_policies(monitoring, project_id):
     return resp.get('alertPolicies', [])
 
 
+def get_destination_bucket_exists(storage_api, destination):
+    """True/False if `destination` is a storage.googleapis.com/<bucket>
+    sink target and the existence check was conclusive (404 -> False,
+    everything else that succeeds or comes back 403 -> True/None); None
+    immediately, no call at all, if `destination` isn't a GCS bucket.
+    A 403 (bucket exists, this credential just can't see it) returns
+    None rather than raising — inconclusive, but not itself a failure.
+    Any other error raises, for gather() to isolate and record."""
+    if not destination.startswith('storage.googleapis.com/'):
+        return None
+    bucket_name = destination[len('storage.googleapis.com/'):]
+    try:
+        storage_api.buckets().get(bucket=bucket_name).execute()
+        return True
+    except HttpError as e:
+        if e.resp.status == 404:
+            return False
+        if e.resp.status == 403:
+            return None
+        raise
+
+
 def gather(project_id, credentials, writer):
     logging_api = discovery.build('logging', 'v2', credentials=credentials)
     monitoring = discovery.build('monitoring', 'v3', credentials=credentials)
+    crm = discovery.build('cloudresourcemanager', 'v1', credentials=credentials)
+    storage_api = discovery.build('storage', 'v1', credentials=credentials)
 
     try:
         for bucket in get_log_buckets(logging_api, project_id):
@@ -79,12 +112,18 @@ def gather(project_id, credentials, writer):
     try:
         for sink in get_log_sinks(logging_api, project_id):
             name = sink.get('name', '')
+            raw = dict(sink)
+            try:
+                raw['_DestinationBucketExists'] = get_destination_bucket_exists(storage_api, sink.get('destination', ''))
+            except Exception as e:
+                raw['_DestinationBucketExists'] = None
+                writer.add_error(region='global', source=f'log_sink (destination bucket:{name})', message=e)
             writer.add_resource(
                 resource_type='log_sink',
                 region='global',
                 resource_id=name,
                 resource_name=name.split('/')[-1],
-                raw=sink,
+                raw=raw,
             )
     except Exception as e:
         writer.add_error(region='global', source='log_sink', message=e)
@@ -114,3 +153,17 @@ def gather(project_id, credentials, writer):
             )
     except Exception as e:
         writer.add_error(region='global', source='alert_policy', message=e)
+
+    # --- Project IAM policy (audit configs) — reused from iam.py's own
+    # get_iam_policy(), same resource shape its own gather() produces. ---
+    try:
+        policy = get_iam_policy(crm, project_id)
+        writer.add_resource(
+            resource_type='iam_policy',
+            region='global',
+            resource_id=f'{project_id}/iam',
+            resource_name=project_id,
+            raw=policy,
+        )
+    except Exception as e:
+        writer.add_error(region='global', source='iam_policy', message=e)

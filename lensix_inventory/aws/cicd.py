@@ -70,22 +70,31 @@ def _redact_project(project):
 
 
 def gather(region, writer):
-    for repo in get_repositories(region):
-        writer.add_resource(
-            resource_type='codecommit_repo',
-            region=region,
-            resource_id=repo.get('repositoryId', repo.get('repositoryName', '')),
-            resource_name=repo.get('repositoryName', ''),
-            raw=repo,
-        )
+    # CodeCommit repos and CodeBuild projects are independent list calls —
+    # isolate them so a failure fetching one doesn't prevent the other
+    # from being gathered.
+    try:
+        for repo in get_repositories(region):
+            writer.add_resource(
+                resource_type='codecommit_repo',
+                region=region,
+                resource_id=repo.get('repositoryId', repo.get('repositoryName', '')),
+                resource_name=repo.get('repositoryName', ''),
+                raw=repo,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='cicd (codecommit repos)', message=e)
 
-    for project in get_codebuild_projects(region):
-        raw, secret_hits = _redact_project(project)
-        writer.add_resource(
-            resource_type='codebuild_project',
-            region=region,
-            resource_id=project.get('arn', project.get('name', '')),
-            resource_name=project.get('name', ''),
-            raw=raw,
-            secret_scan_hits=secret_hits,
-        )
+    try:
+        for project in get_codebuild_projects(region):
+            raw, secret_hits = _redact_project(project)
+            writer.add_resource(
+                resource_type='codebuild_project',
+                region=region,
+                resource_id=project.get('arn', project.get('name', '')),
+                resource_name=project.get('name', ''),
+                raw=raw,
+                secret_scan_hits=secret_hits,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='cicd (codebuild projects)', message=e)

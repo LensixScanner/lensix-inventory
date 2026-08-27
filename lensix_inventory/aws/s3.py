@@ -57,6 +57,12 @@ def get_bucket_metadata(s3, bucket_name, account_id):
         'Logging': _try(s3.get_bucket_logging, Bucket=bucket_name),
         'PublicAccessBlock': _try(s3.get_public_access_block, Bucket=bucket_name),
         'Policy': policy_doc,
+        # Preserved alongside the parsed Policy doc (which is None both
+        # when there's genuinely no policy and when the fetch itself
+        # failed for some other reason) so a check can still tell those
+        # two cases apart — e.g. "no bucket policy at all" vs "couldn't
+        # fetch it" need different findings/no-findings behavior.
+        '_PolicyFetchError': policy_raw.get('_error') if isinstance(policy_raw, dict) else None,
         'LifecycleConfiguration': _try(s3.get_bucket_lifecycle_configuration, Bucket=bucket_name),
         'Versioning': _try(s3.get_bucket_versioning, Bucket=bucket_name),
         'Encryption': _try(s3.get_bucket_encryption, Bucket=bucket_name),

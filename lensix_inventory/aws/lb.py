@@ -1,14 +1,27 @@
 """Load balancer gathering — Classic ELBs and modern ALB/NLBs.
 
-Two resource types: `classic_load_balancer` and `load_balancer` (ALB/NLB).
-Target groups aren't a separate resource type — instead (mirroring s3.py's
-fused per-bucket fan-out) each modern load balancer's raw record folds in
-every relevant sub-API call against that same load balancer: attributes,
+Three resource types: `classic_load_balancer`, `load_balancer` (ALB/NLB),
+and `target_group`. Each modern load balancer's raw record folds in every
+relevant sub-API call against that same load balancer: attributes,
 listeners (used for HTTP-listener/TLS-policy/security-policy/no-HTTPS
-evaluation), target groups with their own attributes and target health
-(used for unused/nonredundant/unhealthy/deregistration-delay evaluation),
-and — for ALBs only — the attached WAF Web ACL, if any. Classic LBs get the
-equivalent fold-in of attributes and instance health.
+evaluation), its own target groups with their own attributes and target
+health nested under `_TargetGroups` (used for unused/nonredundant/
+unhealthy evaluation scoped to that one load balancer), and — for ALBs
+only — the attached WAF Web ACL, if any. Classic LBs get the equivalent
+fold-in of attributes and instance health.
+
+`target_group` is ALSO gathered as its own top-level, region-wide resource
+type (describe_target_groups() with no LoadBalancerArn filter) — unlike
+the nested `_TargetGroups`, this catches target groups that exist but
+aren't attached to any load balancer at all, and lets any check needing
+"does target group X still exist" (e.g. an Auto Scaling group's
+TargetGroupARNs, or a listener rule's forward action) correlate against
+the full region-wide set instead of needing a live call of its own. This
+duplicates a `describe_target_group_attributes`/`describe_target_health`
+call for target groups that ARE attached to a load balancer (once here,
+once via that load balancer's own `_TargetGroups` fold-in) — an accepted,
+disclosed inefficiency in exchange for not having to restructure the
+already-established per-load-balancer fold-in shape.
 """
 
 import boto3
@@ -71,6 +84,17 @@ def get_target_groups(region, lb_arn):
     return tgs
 
 
+def get_all_target_groups(region):
+    """Every target group in the region, regardless of whether it's
+    attached to a load balancer — unlike get_target_groups() above, which
+    is scoped to one load balancer's own attached target groups."""
+    elbv2 = boto3.client('elbv2', region_name=region)
+    tgs = []
+    for page in elbv2.get_paginator('describe_target_groups').paginate():
+        tgs.extend(page['TargetGroups'])
+    return tgs
+
+
 def get_target_group_attributes(region, tg_arn):
     elbv2 = boto3.client('elbv2', region_name=region)
     try:
@@ -102,7 +126,14 @@ def get_web_acl(region, resource_arn):
 
 
 def gather(region, writer):
-    for lb in get_classic_lbs(region):
+    # Classic ELBs and modern ALB/NLBs are independent describe calls —
+    # isolate them so one's failure doesn't discard the other.
+    try:
+        classic_lbs = get_classic_lbs(region)
+    except Exception as e:
+        writer.add_error(region=region, source='lb (classic)', message=e)
+        classic_lbs = []
+    for lb in classic_lbs:
         name = lb['LoadBalancerName']
         raw = dict(lb)
         raw['_Attributes'] = get_classic_attributes(region, name)
@@ -116,7 +147,12 @@ def gather(region, writer):
             raw=raw,
         )
 
-    for lb in get_modern_lbs(region):
+    try:
+        modern_lbs = get_modern_lbs(region)
+    except Exception as e:
+        writer.add_error(region=region, source='lb (modern)', message=e)
+        modern_lbs = []
+    for lb in modern_lbs:
         name = lb['LoadBalancerName']
         arn = lb['LoadBalancerArn']
         tgs = get_target_groups(region, arn)
@@ -142,5 +178,23 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=name,
             scope_id=lb.get('VpcId'),
+            raw=raw,
+        )
+
+    try:
+        all_tgs = get_all_target_groups(region)
+    except Exception as e:
+        writer.add_error(region=region, source='lb (target groups)', message=e)
+        all_tgs = []
+    for tg in all_tgs:
+        tg_arn = tg['TargetGroupArn']
+        raw = dict(tg)
+        raw['_Attributes'] = get_target_group_attributes(region, tg_arn)
+        raw['_TargetHealthDescriptions'] = get_target_health(region, tg_arn)
+        writer.add_resource(
+            resource_type='target_group',
+            region=region,
+            resource_id=tg_arn,
+            resource_name=tg.get('TargetGroupName', tg_arn),
             raw=raw,
         )

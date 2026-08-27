@@ -93,7 +93,13 @@ def gather(region, writer):
                 resource_name=cluster_arn.split('/')[-1], raw=cluster,
             )
 
-    for family in get_task_definition_families(region):
+    try:
+        families = get_task_definition_families(region)
+    except Exception as e:
+        writer.add_error(region=region, source='ecs_task_definition', message=e)
+        families = []
+
+    for family in families:
         try:
             task_def = describe_task_definition(region, family)
         except Exception as e:

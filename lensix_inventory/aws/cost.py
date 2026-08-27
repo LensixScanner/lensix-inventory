@@ -21,21 +21,29 @@ def get_budgets(account_id):
 
 def get_notifications(account_id, budget_name):
     budgets_client = boto3.client('budgets', region_name='us-east-1')
-    try:
-        resp = budgets_client.describe_notifications_for_budget(
-            AccountId=account_id,
-            BudgetName=budget_name,
-        )
-        return resp.get('Notifications', [])
-    except Exception:
-        return []
+    resp = budgets_client.describe_notifications_for_budget(
+        AccountId=account_id,
+        BudgetName=budget_name,
+    )
+    return resp.get('Notifications', [])
 
 
 def gather(writer, account_id):
     for budget in get_budgets(account_id):
         name = budget['BudgetName']
         raw = dict(budget)
-        raw['_Notifications'] = get_notifications(account_id, name)
+        # Isolated per budget: a permission/throttling failure fetching
+        # one budget's notifications shouldn't be silently indistinguishable
+        # from "this budget genuinely has zero notifications configured" —
+        # that would turn a fetch error into a false-positive
+        # "no notifications" finding downstream. Falls back to an empty
+        # list either way (the raw record still needs *a* value), but the
+        # failure itself is recorded.
+        try:
+            raw['_Notifications'] = get_notifications(account_id, name)
+        except Exception as e:
+            raw['_Notifications'] = []
+            writer.add_error(region='global', source=f'cost (notifications: {name})', message=e)
         writer.add_resource(
             resource_type='budget',
             region='global',

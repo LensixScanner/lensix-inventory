@@ -86,7 +86,14 @@ def get_stage_web_acl(region, api_id, stage_name):
 
 
 def gather(region, writer):
-    rest_apis = get_rest_apis(region)
+    # REST APIs, HTTP APIs, v1 domains, and v2 domains are four
+    # independent fetches — isolate each so one's failure doesn't discard
+    # the other three.
+    try:
+        rest_apis = get_rest_apis(region)
+    except Exception as e:
+        writer.add_error(region=region, source='apigateway (rest apis)', message=e)
+        rest_apis = []
     for api in rest_apis:
         writer.add_resource(
             resource_type='apigw_rest_api', region=region, resource_id=api['id'],
@@ -116,7 +123,11 @@ def gather(region, writer):
                 resource_name=f'{api_name}/{stage_name}', raw=raw,
             )
 
-    http_apis = get_http_apis(region)
+    try:
+        http_apis = get_http_apis(region)
+    except Exception as e:
+        writer.add_error(region=region, source='apigateway (http apis)', message=e)
+        http_apis = []
     for api in http_apis:
         writer.add_resource(
             resource_type='apigw_http_api', region=region, resource_id=api['ApiId'],
@@ -142,7 +153,12 @@ def gather(region, writer):
                 resource_name=f'{api_name}/{stage_name}', raw=raw,
             )
 
-    for domain in get_v1_domain_names(region):
+    try:
+        v1_domains = get_v1_domain_names(region)
+    except Exception as e:
+        writer.add_error(region=region, source='apigateway (v1 domains)', message=e)
+        v1_domains = []
+    for domain in v1_domains:
         name = domain['domainName']
         raw = dict(domain)
         raw['_ApiType'] = 'REST'
@@ -151,7 +167,12 @@ def gather(region, writer):
             resource_name=name, raw=raw,
         )
 
-    for domain in get_v2_domain_names(region):
+    try:
+        v2_domains = get_v2_domain_names(region)
+    except Exception as e:
+        writer.add_error(region=region, source='apigateway (v2 domains)', message=e)
+        v2_domains = []
+    for domain in v2_domains:
         name = domain['DomainName']
         raw = dict(domain)
         raw['_ApiType'] = 'HTTP'

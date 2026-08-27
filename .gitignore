@@ -5,3 +5,4 @@ venv/
 *.ndjson.gz
 *.ndjson
 .env
+*.egg-info/

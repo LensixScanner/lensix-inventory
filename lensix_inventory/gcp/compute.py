@@ -16,7 +16,15 @@ Secrets exception (matching aws/ec2.py's user-data handling): instance and
 project metadata VALUES are exactly the kind of free-text field that can
 carry hardcoded credentials. Those values are scanned locally for secrets
 and discarded immediately; only the metadata KEY names and the scan result
-travel in the uploaded record, never the values themselves.
+travel in the uploaded record, never the values themselves — with one
+narrow exception (`_CHECK_RELEVANT_METADATA_KEYS`): serial-port-enable,
+enable-oslogin, enable-oslogin-2fa, and ssh-keys are known config flags
+(ssh-keys holds public keys, not secrets — public by definition) that
+several checks need the actual value of, not just "is this key present."
+Their values are still scanned for secrets like every other key (in case
+a customer stashed something unexpected in one), but also kept verbatim
+in `itemValues`, so those checks can read them without a second live
+call.
 
 GCP resources are project-scoped, not per-region like AWS — every list call
 below is an aggregatedList/list(project=...) call that already covers every
@@ -47,16 +55,28 @@ def _instance_network(instance):
     return None
 
 
+# The only metadata keys whose VALUE (not just its presence) is kept —
+# see the module docstring's "Secrets exception" for why these four are
+# safe: config flags or public keys, not secret-bearing free text.
+_CHECK_RELEVANT_METADATA_KEYS = {'serial-port-enable', 'enable-oslogin', 'enable-oslogin-2fa', 'ssh-keys'}
+
+
 def _redact_metadata(items):
-    """Returns (key_names_only, secret_scan_hits) for an instance/project
-    metadata `items` list — the raw values are scanned then discarded
-    immediately, never returned or uploaded."""
+    """Returns (key_names_only, secret_scan_hits, relevant_values) for an
+    instance/project metadata `items` list — every value is scanned for
+    secrets then discarded, except the small _CHECK_RELEVANT_METADATA_KEYS
+    allowlist, whose values are kept verbatim in `relevant_values`."""
     items = items or []
     hits = []
+    relevant_values = {}
     for item in items:
-        hits.extend(scan_text_for_secrets(item.get('value', '') or ''))
+        value = item.get('value', '') or ''
+        hits.extend(scan_text_for_secrets(value))
+        key = item.get('key')
+        if key in _CHECK_RELEVANT_METADATA_KEYS:
+            relevant_values[key] = value
     key_names = sorted({item['key'] for item in items if item.get('key')})
-    return key_names, sorted(set(hits))
+    return key_names, sorted(set(hits)), relevant_values
 
 
 def get_instances(compute, project_id):
@@ -146,11 +166,11 @@ def gather(project_id, credentials, writer):
         if inst.get('status') in ('TERMINATED', 'SUSPENDED'):
             continue
         zone = _zone_from_url(inst.get('zone'))
-        key_names, secret_hits = _redact_metadata(inst.get('metadata', {}).get('items'))
+        key_names, secret_hits, relevant_values = _redact_metadata(inst.get('metadata', {}).get('items'))
 
         raw = dict(inst)
         if 'metadata' in raw:
-            raw['metadata'] = {**raw['metadata'], 'itemKeys': key_names}
+            raw['metadata'] = {**raw['metadata'], 'itemKeys': key_names, 'itemValues': relevant_values}
             raw['metadata'].pop('items', None)
 
         writer.add_resource(
@@ -228,13 +248,13 @@ def gather(project_id, credentials, writer):
     # --- Project-level metadata (ssh-keys, oslogin, ... — same redaction as instance metadata) ---
     try:
         items = get_project_metadata_items(compute, project_id)
-        key_names, secret_hits = _redact_metadata(items)
+        key_names, secret_hits, relevant_values = _redact_metadata(items)
         writer.add_resource(
             resource_type='compute_project_metadata',
             region='global',
             resource_id=project_id,
             resource_name=project_id,
-            raw={'itemKeys': key_names},
+            raw={'itemKeys': key_names, 'itemValues': relevant_values},
             secret_scan_hits=secret_hits,
         )
     except Exception as e:
