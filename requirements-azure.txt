@@ -3,7 +3,11 @@ azure-core>=1.29
 azure-mgmt-compute>=30.0
 azure-mgmt-network>=25.0
 azure-mgmt-storage>=21.0
-azure-mgmt-resource>=23.0
+# <25.0: 25.0.0 dropped the azure.mgmt.resource top-level re-export of
+# PolicyClient (needed by lensix_inventory/azure/policy.py) and the
+# azure.mgmt.resource.locks submodule; last confirmed-working release is
+# 24.0.0.
+azure-mgmt-resource>=23.0,<25.0
 azure-mgmt-subscription>=3.0
 azure-mgmt-monitor>=6.0
 azure-mgmt-containerservice>=29.0

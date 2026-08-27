@@ -40,22 +40,31 @@ def get_cache_clusters(region):
 
 
 def gather(region, writer):
-    for rg in get_replication_groups(region):
-        rg_id = rg['ReplicationGroupId']
-        writer.add_resource(
-            resource_type='elasticache_replication_group',
-            region=region,
-            resource_id=rg.get('ARN', rg_id),
-            resource_name=rg_id,
-            raw=rg,
-        )
+    # Replication groups and cache clusters are independent describe
+    # calls — isolate them so a failure fetching one doesn't prevent the
+    # other from being gathered.
+    try:
+        for rg in get_replication_groups(region):
+            rg_id = rg['ReplicationGroupId']
+            writer.add_resource(
+                resource_type='elasticache_replication_group',
+                region=region,
+                resource_id=rg.get('ARN', rg_id),
+                resource_name=rg_id,
+                raw=rg,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='elasticache (replication groups)', message=e)
 
-    for cluster in get_cache_clusters(region):
-        cluster_id = cluster['CacheClusterId']
-        writer.add_resource(
-            resource_type='elasticache_cluster',
-            region=region,
-            resource_id=cluster.get('ARN', cluster_id),
-            resource_name=cluster_id,
-            raw=cluster,
-        )
+    try:
+        for cluster in get_cache_clusters(region):
+            cluster_id = cluster['CacheClusterId']
+            writer.add_resource(
+                resource_type='elasticache_cluster',
+                region=region,
+                resource_id=cluster.get('ARN', cluster_id),
+                resource_name=cluster_id,
+                raw=cluster,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='elasticache (cache clusters)', message=e)

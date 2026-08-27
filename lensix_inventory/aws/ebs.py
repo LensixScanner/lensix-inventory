@@ -79,6 +79,9 @@ def _tag_name(tags, fallback):
 
 
 def gather(region, writer):
+    # Region settings, volumes, snapshots, and AMIs are four independent
+    # fetches — isolate them so a failure fetching one doesn't prevent
+    # the others from being gathered.
     enc_default = get_ebs_encryption_by_default(region)
     if enc_default is not None:
         writer.add_resource(
@@ -86,23 +89,32 @@ def gather(region, writer):
             resource_name=region, raw=enc_default,
         )
 
-    for vol in get_volumes(region):
-        writer.add_resource(
-            resource_type='ebs_volume', region=region, resource_id=vol['VolumeId'],
-            resource_name=_tag_name(vol.get('Tags'), vol['VolumeId']), raw=vol,
-        )
+    try:
+        for vol in get_volumes(region):
+            writer.add_resource(
+                resource_type='ebs_volume', region=region, resource_id=vol['VolumeId'],
+                resource_name=_tag_name(vol.get('Tags'), vol['VolumeId']), raw=vol,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='ebs (volumes)', message=e)
 
-    public_snap_ids = get_public_snapshot_ids(region)
-    for snap in get_snapshots(region):
-        raw = dict(snap)
-        raw['_Public'] = snap['SnapshotId'] in public_snap_ids
-        writer.add_resource(
-            resource_type='ebs_snapshot', region=region, resource_id=snap['SnapshotId'],
-            resource_name=_tag_name(snap.get('Tags'), snap['SnapshotId']), raw=raw,
-        )
+    try:
+        public_snap_ids = get_public_snapshot_ids(region)
+        for snap in get_snapshots(region):
+            raw = dict(snap)
+            raw['_Public'] = snap['SnapshotId'] in public_snap_ids
+            writer.add_resource(
+                resource_type='ebs_snapshot', region=region, resource_id=snap['SnapshotId'],
+                resource_name=_tag_name(snap.get('Tags'), snap['SnapshotId']), raw=raw,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='ebs (snapshots)', message=e)
 
-    for ami in get_amis(region):
-        writer.add_resource(
-            resource_type='ebs_ami', region=region, resource_id=ami['ImageId'],
-            resource_name=ami.get('Name', ami['ImageId']), raw=ami,
-        )
+    try:
+        for ami in get_amis(region):
+            writer.add_resource(
+                resource_type='ebs_ami', region=region, resource_id=ami['ImageId'],
+                resource_name=ami.get('Name', ami['ImageId']), raw=ami,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='ebs (amis)', message=e)

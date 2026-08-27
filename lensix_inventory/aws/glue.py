@@ -1,11 +1,13 @@
-"""Glue gathering — security configurations and connections (connection
-property values redacted).
+"""Glue gathering — security configurations, connections (connection
+property values redacted), and the Data Catalog's region-wide encryption
+setting.
 
-Two resource types are gathered here (`glue_security_config`,
-`glue_connection`). The Data Catalog's account-wide encryption settings
-(`get_data_catalog_encryption_settings()`) are deliberately not gathered —
-that's a per-account singleton setting, not an enumerable resource, so
-there's no resource shape to represent it as.
+Three resource types are gathered here (`glue_security_config`,
+`glue_connection`, `glue_catalog_encryption`). The catalog encryption
+setting is a per-region singleton, not an enumerable resource — it's
+gathered under a fixed synthetic resource_id ('catalog_encryption'), the
+same convention lensix_inventory.aws.account.py uses for
+`iam_password_policy`.
 
 **Secrets exception**: a Glue connection's `ConnectionProperties` is a free-
 form string map that — unless the connection is set up to pull credentials
@@ -30,6 +32,11 @@ def get_security_configurations(region):
     for page in glue.get_paginator('get_security_configurations').paginate():
         configs.extend(page.get('SecurityConfigurations', []))
     return configs
+
+
+def get_catalog_encryption_settings(region):
+    glue = boto3.client('glue', region_name=region)
+    return glue.get_data_catalog_encryption_settings()['DataCatalogEncryptionSettings']
 
 
 def get_connections(region):
@@ -61,24 +68,46 @@ def _redact_connection(conn):
 
 
 def gather(region, writer):
-    for cfg in get_security_configurations(region):
-        name = cfg['Name']
-        writer.add_resource(
-            resource_type='glue_security_config',
-            region=region,
-            resource_id=name,
-            resource_name=name,
-            raw=cfg,
-        )
+    # Security configurations and connections are independent fetches —
+    # isolate them so a failure fetching one doesn't prevent the other
+    # from being gathered.
+    try:
+        for cfg in get_security_configurations(region):
+            name = cfg['Name']
+            writer.add_resource(
+                resource_type='glue_security_config',
+                region=region,
+                resource_id=name,
+                resource_name=name,
+                raw=cfg,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='glue (security configurations)', message=e)
 
-    for conn in get_connections(region):
-        name = conn.get('Name', '')
-        raw, secret_hits = _redact_connection(conn)
+    try:
+        for conn in get_connections(region):
+            name = conn.get('Name', '')
+            raw, secret_hits = _redact_connection(conn)
+            writer.add_resource(
+                resource_type='glue_connection',
+                region=region,
+                resource_id=name,
+                resource_name=name,
+                raw=raw,
+                secret_scan_hits=secret_hits,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='glue (connections)', message=e)
+
+    try:
+        settings = get_catalog_encryption_settings(region)
+    except Exception as e:
+        writer.add_error(region=region, source='glue (catalog encryption)', message=e)
+    else:
         writer.add_resource(
-            resource_type='glue_connection',
+            resource_type='glue_catalog_encryption',
             region=region,
-            resource_id=name,
-            resource_name=name,
-            raw=raw,
-            secret_scan_hits=secret_hits,
+            resource_id='catalog_encryption',
+            resource_name='Data Catalog',
+            raw=settings,
         )

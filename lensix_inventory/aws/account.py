@@ -1,8 +1,9 @@
 """Account/IAM-level gathering — IAM roles, groups, policies, server
 certificates, virtual MFA devices, password policy, account summary, SSO
-(Identity Center) instances/permission sets (global; IAM *users*
-specifically are gathered by user.py, not here — see gather_global()'s
-docstring), plus KMS keys, CloudTrail trails, AWS Config recorders/delivery
+(Identity Center) instances/permission sets, and the IAM credential
+report's root-account row as `iam_root` (global; IAM *users* specifically
+are gathered by user.py, not here — see gather_global()'s docstring),
+plus KMS keys, CloudTrail trails, AWS Config recorders/delivery
 channels/aggregators, GuardDuty detectors, IAM Access Analyzer analyzers,
 CloudWatch log groups, and X-Ray encryption config (regional).
 
@@ -11,28 +12,38 @@ scanner, but only the underlying list/describe API call matters here — the
 same "fetch first, evaluate separately" split used throughout this tool
 (see `s3.py` and `sg.py`) — so each is exposed as a plain `get_*` fetcher.
 
-Deliberately not gathered (evaluation/correlation logic, not resource
-gathering):
+Deliberately not gathered (evaluation logic, not resource gathering):
   - Privilege-escalation-path evaluation via iam.simulate_principal_policy
     — a live "what-if" policy simulation call, not a listing of existing
     resource state.
-  - Root-account access-key/usage evaluation via the IAM credential report
-    (generate_credential_report + poll get_credential_report) — the
-    classic stateful generate-then-poll workflow this tool's design
-    explicitly excludes; not a simple list/describe call.
-  - Root-usage and CIS-benchmark alarm-coverage evaluation, which searches
-    CloudWatch Logs metric filters + CloudWatch alarms + EventBridge rules
-    for specific keyword patterns to answer "does an alarm covering event
-    X exist anywhere" — finding-time correlation, not a resource listing,
-    the same category of exclusion as sg.py's cross-service "is this SG
-    referenced anywhere" correlation.
+
+Root-usage and CIS-benchmark alarm-coverage evaluation ARE gathered now
+(get_metric_filters_with_alarms, get_eventbridge_rules) as
+`cloudwatch_metric_filter`/`eventbridge_rule` resources — the actual
+keyword-pattern correlation ("does an alarm covering event X exist
+anywhere") stays a check-time concern (same "gather raw, correlate
+separately" split sg.py's own get_attached_sg_ids() uses for its
+cross-service fan-out), it just no longer needs a live call to do it.
+gather()'s log groups come from the SAME region's already-fetched trails
+(CloudWatchLogsLogGroupArn — no extra describe_trails call); gather_global()
+takes an optional `regions` list and re-fetches trails per region (a
+deliberate, accepted duplicate of gather()'s own per-region trail fetch —
+same tradeoff lb.py's dual target_group gather already established) since
+root-usage coverage needs to be evaluated once across every region, not
+per-region, and gather_global() has no other way to know what regions
+exist.
 
 Everything else — the plain list/describe calls each check fuses with its
-condition check — is gathered here as raw resource data for Lensix to
+condition check, plus the credential report's root row (a stateful
+generate-then-poll workflow, but still just a listing of existing
+account state) — is gathered here as raw resource data for Lensix to
 evaluate server-side.
 """
 
+import csv
+import io
 import json
+import time
 
 import boto3
 import botocore
@@ -321,78 +332,257 @@ def get_xray_encryption_config(region):
         return None
 
 
+def get_trail_log_group_names(trails):
+    """Derives CloudWatch Logs log group names from already-fetched trail
+    records (CloudWatchLogsLogGroupArn) — pure, no API call of its own."""
+    names = []
+    for t in trails:
+        arn = t.get('CloudWatchLogsLogGroupArn')
+        if arn:
+            names.append(arn.split(':log-group:')[1].split(':')[0])
+    return names
+
+
+def get_metric_filters_with_alarms(region, log_group):
+    """describe_metric_filters for one log group, each filter merged with
+    the CloudWatch alarms watching its metric(s) (`_Alarms`) — covers the
+    CIS-benchmark/root-usage "is there an alarm for event X" checks, which
+    need both the filter's pattern text and whether a real alarm (with
+    actions) is wired up to it."""
+    logs = boto3.client('logs', region_name=region)
+    cw = boto3.client('cloudwatch', region_name=region)
+    filters = []
+    for page in logs.get_paginator('describe_metric_filters').paginate(logGroupName=log_group):
+        filters.extend(page['metricFilters'])
+    for f in filters:
+        alarms = []
+        for mt in f.get('metricTransformations', []):
+            alarms.extend(_try(
+                cw.describe_alarms_for_metric,
+                MetricName=mt['metricName'], Namespace=mt['metricNamespace'],
+            ).get('MetricAlarms', []))
+        f['_Alarms'] = alarms
+    return filters
+
+
+def get_eventbridge_rules(region):
+    """list_rules merged with each rule's targets (`_Targets`) — the
+    alternative alarm-coverage mechanism to a CloudWatch Logs metric
+    filter + alarm."""
+    events = boto3.client('events', region_name=region)
+    rules = []
+    for page in events.get_paginator('list_rules').paginate():
+        rules.extend(page.get('Rules', []))
+    for rule in rules:
+        rule['_Targets'] = _try(
+            events.list_targets_by_rule,
+            Rule=rule['Name'], EventBusName=rule.get('EventBusName', 'default'),
+        ).get('Targets', [])
+    return rules
+
+
+def get_root_credential_report_row():
+    """Same generate-then-poll workflow as user.py's own
+    get_credential_report() (duplicated rather than shared — this module
+    and user.py are gathered by two separate live containers, so there's
+    no way to share the actual live call between them either way), but
+    only the `<root_account>` row is kept — user.py's own per-user merge
+    explicitly drops that row since root is never a list_users() result."""
+    iam = boto3.client('iam')
+    try:
+        iam.generate_credential_report()
+    except iam.exceptions.LimitExceededException:
+        pass
+    content = None
+    for _ in range(15):
+        try:
+            resp = iam.get_credential_report()
+            content = resp['Content'].decode('utf-8')
+            break
+        except iam.exceptions.CredentialReportNotReadyException:
+            time.sleep(2)
+    if content is None:
+        raise TimeoutError('Credential report not ready after 15 retries')
+    reader = csv.DictReader(io.StringIO(content))
+    for row in reader:
+        if row.get('user') == '<root_account>':
+            return row
+    return None
+
+
 # --- Gatherers ---
 
-def gather_global(writer, account_id):
+def gather_global(writer, account_id, regions=None):
     """Gathers account-wide IAM/SSO resources once (not per-region).
     Note: `iam_user` is deliberately NOT gathered here — user.py owns that
-    resource type (it's the 1:1 port of user_checks.py) to avoid gathering
-    the same users twice; see user.py's docstring."""
-    for role in get_iam_roles():
+    resource type, to avoid gathering the same users twice; see user.py's
+    docstring.
+
+    Ten independent fetches — isolate each so one's failure doesn't
+    discard the others. When `regions` is given, also re-fetches trails +
+    metric-filter/alarm + EventBridge data per region (a deliberate,
+    accepted duplicate of gather()'s own per-region fetch — see this
+    module's own docstring) so root-usage alarm coverage, which has to be
+    evaluated once across every region rather than per-region, has
+    something to read regardless of which regions scan_region() itself
+    ends up covering."""
+    try:
+        roles = get_iam_roles()
+    except Exception as e:
+        writer.add_error(region='global', source='account (iam roles)', message=e)
+        roles = []
+    for role in roles:
         writer.add_resource(
             resource_type='iam_role', region='global', resource_id=role['RoleId'],
             resource_name=role['RoleName'], raw=role,
         )
 
-    for group in get_iam_groups():
+    try:
+        groups = get_iam_groups()
+    except Exception as e:
+        writer.add_error(region='global', source='account (iam groups)', message=e)
+        groups = []
+    for group in groups:
         writer.add_resource(
             resource_type='iam_group', region='global', resource_id=group['GroupId'],
             resource_name=group['GroupName'], raw=group,
         )
 
-    for policy in get_iam_policies():
+    try:
+        policies = get_iam_policies()
+    except Exception as e:
+        writer.add_error(region='global', source='account (iam policies)', message=e)
+        policies = []
+    for policy in policies:
         writer.add_resource(
             resource_type='iam_policy', region='global', resource_id=policy['Arn'],
             resource_name=policy['PolicyName'], raw=policy,
         )
 
-    for cert in get_iam_server_certificates():
+    try:
+        certs = get_iam_server_certificates()
+    except Exception as e:
+        writer.add_error(region='global', source='account (server certificates)', message=e)
+        certs = []
+    for cert in certs:
         writer.add_resource(
             resource_type='iam_server_certificate', region='global',
             resource_id=cert.get('Arn', cert.get('ServerCertificateName')),
             resource_name=cert.get('ServerCertificateName', cert.get('Arn')), raw=cert,
         )
 
-    for device in get_iam_virtual_mfa_devices():
+    try:
+        devices = get_iam_virtual_mfa_devices()
+    except Exception as e:
+        writer.add_error(region='global', source='account (virtual mfa devices)', message=e)
+        devices = []
+    for device in devices:
         serial = device['SerialNumber']
         writer.add_resource(
             resource_type='iam_virtual_mfa_device', region='global', resource_id=serial,
             resource_name=serial, raw=device,
         )
 
-    pw_policy = get_password_policy()
+    try:
+        pw_policy = get_password_policy()
+    except Exception as e:
+        writer.add_error(region='global', source='account (password policy)', message=e)
+        pw_policy = {'_configured': None}
     writer.add_resource(
         resource_type='iam_password_policy', region='global', resource_id='password_policy',
         resource_name='password_policy', raw=pw_policy,
     )
 
-    summary_raw = {
-        'SummaryMap': get_account_summary(),
-        '_SupportAccessRoles': get_support_access_roles(),
-    }
-    writer.add_resource(
-        resource_type='iam_account_summary', region='global', resource_id='account_summary',
-        resource_name='account_summary', raw=summary_raw,
-    )
+    try:
+        summary_raw = {
+            'SummaryMap': get_account_summary(),
+            '_SupportAccessRoles': get_support_access_roles(),
+        }
+    except Exception as e:
+        writer.add_error(region='global', source='account (account summary)', message=e)
+        summary_raw = None
+    if summary_raw is not None:
+        writer.add_resource(
+            resource_type='iam_account_summary', region='global', resource_id='account_summary',
+            resource_name='account_summary', raw=summary_raw,
+        )
 
-    for instance in get_sso_instances():
+    try:
+        sso_instances = get_sso_instances()
+    except Exception as e:
+        writer.add_error(region='global', source='account (sso instances)', message=e)
+        sso_instances = []
+    for instance in sso_instances:
         instance_arn = instance.get('InstanceArn')
         writer.add_resource(
             resource_type='sso_instance', region='global', resource_id=instance_arn,
             resource_name=instance.get('IdentityStoreId', instance_arn), raw=instance,
         )
         if instance_arn:
-            for ps in get_sso_permission_sets(instance_arn):
+            try:
+                permission_sets = get_sso_permission_sets(instance_arn)
+            except Exception as e:
+                writer.add_error(region='global', source=f'account (sso permission sets:{instance_arn})', message=e)
+                permission_sets = []
+            for ps in permission_sets:
                 ps_arn = ps.get('PermissionSetArn')
                 writer.add_resource(
                     resource_type='sso_permission_set', region='global', resource_id=ps_arn,
                     resource_name=ps.get('Name', ps_arn), scope_id=instance_arn, raw=ps,
                 )
 
+    try:
+        root_row = get_root_credential_report_row()
+    except Exception as e:
+        writer.add_error(region='global', source='account (root credential report)', message=e)
+        root_row = None
+    writer.add_resource(
+        resource_type='iam_root', region='global', resource_id='root',
+        resource_name='root', raw=root_row or {},
+    )
+
+    for region in (regions or []):
+        try:
+            trails = get_cloudtrail_trails(region)
+        except Exception as e:
+            writer.add_error(region=region, source='account (cloudtrail trails, root-usage coverage)', message=e)
+            trails = []
+        try:
+            for log_group in get_trail_log_group_names(trails):
+                for f in get_metric_filters_with_alarms(region, log_group):
+                    filter_name = f.get('filterName', log_group)
+                    writer.add_resource(
+                        resource_type='cloudwatch_metric_filter', region=region,
+                        resource_id=f'{log_group}:{filter_name}', resource_name=filter_name, raw=f,
+                    )
+        except Exception as e:
+            writer.add_error(region=region, source='account (metric filters, root-usage coverage)', message=e)
+        try:
+            for rule in get_eventbridge_rules(region):
+                name = rule.get('Name', region)
+                writer.add_resource(
+                    resource_type='eventbridge_rule', region=region, resource_id=name,
+                    resource_name=name, raw=rule,
+                )
+        except Exception as e:
+            writer.add_error(region=region, source='account (eventbridge rules, root-usage coverage)', message=e)
+
 
 def gather(region, writer):
-    """Gathers per-region account/security-baseline resources."""
-    for key in get_kms_keys(region):
+    """Gathers per-region account/security-baseline resources.
+
+    Eleven independent fetches — isolate each so one's failure doesn't
+    discard the others. (Metric filters/EventBridge rules derive their
+    log groups from the trails fetch above rather than re-listing trails,
+    so they're isolated from each other but share that one upstream
+    dependency — a trails failure means no log groups to look up, not a
+    metric-filters failure of its own.)"""
+    try:
+        keys = get_kms_keys(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (kms keys)', message=e)
+        keys = []
+    for key in keys:
         key_id = key['KeyId']
         name = key_id
         for alias in key.get('_Aliases', []):
@@ -403,56 +593,121 @@ def gather(region, writer):
             resource_name=name, raw=key,
         )
 
-    for trail in get_cloudtrail_trails(region):
+    try:
+        trails = get_cloudtrail_trails(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (cloudtrail trails)', message=e)
+        trails = []
+    for trail in trails:
         arn = trail.get('TrailARN', trail.get('Name'))
         writer.add_resource(
             resource_type='cloudtrail_trail', region=region, resource_id=arn,
             resource_name=trail.get('Name', arn), raw=trail,
         )
 
-    for recorder in get_config_recorders(region):
+    # Alarm coverage — metric filters (with their alarms resolved) for
+    # every log group the region's own trails deliver to, plus EventBridge
+    # rules. Not the correlation itself (see this module's own docstring)
+    # — just the raw filter/rule data the CIS-benchmark and root-usage
+    # checks need, gathered once here instead of on every check evaluation.
+    try:
+        for log_group in get_trail_log_group_names(trails):
+            for f in get_metric_filters_with_alarms(region, log_group):
+                filter_name = f.get('filterName', log_group)
+                writer.add_resource(
+                    resource_type='cloudwatch_metric_filter', region=region,
+                    resource_id=f'{log_group}:{filter_name}', resource_name=filter_name, raw=f,
+                )
+    except Exception as e:
+        writer.add_error(region=region, source='account (metric filters)', message=e)
+
+    try:
+        for rule in get_eventbridge_rules(region):
+            name = rule.get('Name', region)
+            writer.add_resource(
+                resource_type='eventbridge_rule', region=region, resource_id=name,
+                resource_name=name, raw=rule,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='account (eventbridge rules)', message=e)
+
+    try:
+        recorders = get_config_recorders(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (config recorders)', message=e)
+        recorders = []
+    for recorder in recorders:
         name = recorder.get('name', region)
         writer.add_resource(
             resource_type='config_recorder', region=region, resource_id=name,
             resource_name=name, raw=recorder,
         )
 
-    for channel in get_config_delivery_channels(region):
+    try:
+        channels = get_config_delivery_channels(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (config delivery channels)', message=e)
+        channels = []
+    for channel in channels:
         name = channel.get('name', region)
         writer.add_resource(
             resource_type='config_delivery_channel', region=region, resource_id=name,
             resource_name=name, raw=channel,
         )
 
-    for agg in get_config_aggregators(region):
+    try:
+        aggregators = get_config_aggregators(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (config aggregators)', message=e)
+        aggregators = []
+    for agg in aggregators:
         name = agg.get('ConfigurationAggregatorName', region)
         writer.add_resource(
             resource_type='config_aggregator', region=region, resource_id=name,
             resource_name=name, raw=agg,
         )
 
-    for detector in get_guardduty_detectors(region):
+    try:
+        detectors = get_guardduty_detectors(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (guardduty detectors)', message=e)
+        detectors = []
+    for detector in detectors:
         detector_id = detector['DetectorId']
         writer.add_resource(
             resource_type='guardduty_detector', region=region, resource_id=detector_id,
             resource_name=detector_id, raw=detector,
         )
 
-    for analyzer in get_access_analyzers(region):
+    try:
+        analyzers = get_access_analyzers(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (access analyzers)', message=e)
+        analyzers = []
+    for analyzer in analyzers:
         arn = analyzer.get('arn')
         writer.add_resource(
             resource_type='access_analyzer', region=region, resource_id=arn,
             resource_name=analyzer.get('name', arn), raw=analyzer,
         )
 
-    for lg in get_log_groups(region):
+    try:
+        log_groups = get_log_groups(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (log groups)', message=e)
+        log_groups = []
+    for lg in log_groups:
         name = lg.get('logGroupName')
         writer.add_resource(
             resource_type='cloudwatch_log_group', region=region, resource_id=name,
             resource_name=name, raw=lg,
         )
 
-    xray_cfg = get_xray_encryption_config(region)
+    try:
+        xray_cfg = get_xray_encryption_config(region)
+    except Exception as e:
+        writer.add_error(region=region, source='account (xray encryption config)', message=e)
+        xray_cfg = None
     if xray_cfg is not None:
         writer.add_resource(
             resource_type='xray_encryption_config', region=region, resource_id=f'xray-{region}',

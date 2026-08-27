@@ -79,33 +79,42 @@ def get_apex_txt_records(zone_id, apex_name):
 
 
 def gather(writer):
-    for domain in get_domains():
-        try:
-            detail = get_domain_detail(domain)
-        except Exception as e:
-            writer.add_error(region='global', source=f'route53_domain:{domain}', message=e)
-            continue
-        writer.add_resource(
-            resource_type='route53_domain',
-            region='global',
-            resource_id=domain,
-            resource_name=domain,
-            raw=detail,
-        )
+    # Domains (route53domains) and hosted zones (route53) are independent
+    # services/fetches — isolate them so a failure fetching one doesn't
+    # prevent the other from being gathered.
+    try:
+        for domain in get_domains():
+            try:
+                detail = get_domain_detail(domain)
+            except Exception as e:
+                writer.add_error(region='global', source=f'route53_domain:{domain}', message=e)
+                continue
+            writer.add_resource(
+                resource_type='route53_domain',
+                region='global',
+                resource_id=domain,
+                resource_name=domain,
+                raw=detail,
+            )
+    except Exception as e:
+        writer.add_error(region='global', source='route53 (domains)', message=e)
 
-    for zone_id, zone_name in get_public_zones():
-        # zone_id from list_hosted_zones is the full "/hostedzone/Z123..."
-        # path; use the bare id (matching the AWS console/CLI convention)
-        # as the resource_id — dnsinventory.py's route53_record entries
-        # link back to a zone via this same stripped id in their scope_id.
-        clean_id = zone_id.split('/')[-1]
-        zone_name_clean = zone_name.rstrip('.')
-        raw = {'Id': zone_id, 'Name': zone_name}
-        raw['_ApexTxtRecordSets'] = get_apex_txt_records(zone_id, zone_name)
-        writer.add_resource(
-            resource_type='route53_zone',
-            region='global',
-            resource_id=clean_id,
-            resource_name=zone_name_clean,
-            raw=raw,
-        )
+    try:
+        for zone_id, zone_name in get_public_zones():
+            # zone_id from list_hosted_zones is the full "/hostedzone/Z123..."
+            # path; use the bare id (matching the AWS console/CLI convention)
+            # as the resource_id — dnsinventory.py's route53_record entries
+            # link back to a zone via this same stripped id in their scope_id.
+            clean_id = zone_id.split('/')[-1]
+            zone_name_clean = zone_name.rstrip('.')
+            raw = {'Id': zone_id, 'Name': zone_name}
+            raw['_ApexTxtRecordSets'] = get_apex_txt_records(zone_id, zone_name)
+            writer.add_resource(
+                resource_type='route53_zone',
+                region='global',
+                resource_id=clean_id,
+                resource_name=zone_name_clean,
+                raw=raw,
+            )
+    except Exception as e:
+        writer.add_error(region='global', source='route53 (hosted zones)', message=e)

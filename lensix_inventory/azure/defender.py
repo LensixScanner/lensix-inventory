@@ -36,7 +36,18 @@ def get_network_interfaces(credential, subscription_id):
 
 
 def gather(credential, subscription_id, writer):
-    for pricing in get_pricings(credential, subscription_id):
+    # Isolated separately — a pricings-list failure must not prevent NIC
+    # gathering (and vice versa). A pricings-list failure still yields an
+    # empty plan list here rather than aborting the gather, so downstream
+    # checks can evaluate against "no plans found" instead of being
+    # skipped entirely.
+    try:
+        pricings = get_pricings(credential, subscription_id)
+    except Exception as e:
+        writer.add_error(region='global', source='defender:pricings', message=e)
+        pricings = []
+
+    for pricing in pricings:
         writer.add_resource(
             resource_type='defender_pricing',
             region='global',
@@ -45,7 +56,13 @@ def gather(credential, subscription_id, writer):
             raw=_as_dict(pricing),
         )
 
-    for nic in get_network_interfaces(credential, subscription_id):
+    try:
+        nics = get_network_interfaces(credential, subscription_id)
+    except Exception as e:
+        writer.add_error(region='global', source='defender:network_interfaces', message=e)
+        nics = []
+
+    for nic in nics:
         writer.add_resource(
             resource_type='network_interface',
             region=nic.location or 'global',

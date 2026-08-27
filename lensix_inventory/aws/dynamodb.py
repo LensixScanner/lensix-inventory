@@ -48,26 +48,35 @@ def get_dax_clusters(region):
 
 
 def gather(region, writer):
-    for name in get_tables(region):
-        try:
-            table = get_table_detail(region, name)
-        except Exception as e:
-            writer.add_error(region=region, source=f'dynamodb_table:{name}', message=e)
-            continue
-        table['_ContinuousBackups'] = get_continuous_backups(region, name)
-        writer.add_resource(
-            resource_type='dynamodb_table',
-            region=region,
-            resource_id=table.get('TableArn', name),
-            resource_name=name,
-            raw=table,
-        )
+    # Tables and DAX clusters are independent list calls — isolate them
+    # so a failure fetching one doesn't prevent the other from being
+    # gathered.
+    try:
+        for name in get_tables(region):
+            try:
+                table = get_table_detail(region, name)
+            except Exception as e:
+                writer.add_error(region=region, source=f'dynamodb_table:{name}', message=e)
+                continue
+            table['_ContinuousBackups'] = get_continuous_backups(region, name)
+            writer.add_resource(
+                resource_type='dynamodb_table',
+                region=region,
+                resource_id=table.get('TableArn', name),
+                resource_name=name,
+                raw=table,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='dynamodb (tables)', message=e)
 
-    for cluster in get_dax_clusters(region):
-        writer.add_resource(
-            resource_type='dax_cluster',
-            region=region,
-            resource_id=cluster.get('ClusterArn', cluster.get('ClusterName', '')),
-            resource_name=cluster.get('ClusterName', ''),
-            raw=cluster,
-        )
+    try:
+        for cluster in get_dax_clusters(region):
+            writer.add_resource(
+                resource_type='dax_cluster',
+                region=region,
+                resource_id=cluster.get('ClusterArn', cluster.get('ClusterName', '')),
+                resource_name=cluster.get('ClusterName', ''),
+                raw=cluster,
+            )
+    except Exception as e:
+        writer.add_error(region=region, source='dynamodb (dax clusters)', message=e)

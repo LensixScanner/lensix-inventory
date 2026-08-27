@@ -106,6 +106,16 @@ class InventoryWriter:
     def resource_counts(self):
         return dict(self._counts)
 
+    @property
+    def records(self):
+        """The resource records gathered so far, as plain dicts — same
+        shape each line 2+ of the written file has (minus the "kind" key),
+        available before (and without requiring) a call to write(). Lets a
+        caller consume gathered data directly in memory — build a writer,
+        call the gather_fn(s) it needs, and read .records straight away
+        instead of writing to (and re-parsing) a file."""
+        return list(self._records)
+
     def write(self, path):
         manifest = {
             "kind": "manifest",
