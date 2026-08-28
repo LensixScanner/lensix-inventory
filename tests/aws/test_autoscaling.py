@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import lensix_inventory.aws.autoscaling as m
 
 
@@ -66,6 +68,28 @@ class TestGather:
             m.gather('us-east-1', w)
         assert asg['_LaunchTemplatePublicIp'] is True
 
+    def test_a_lookup_failure_is_recorded_as_a_gather_error_not_swallowed(self):
+        # Regression test: an earlier version of _launches_with_public_ip
+        # caught this exception internally and returned None with zero
+        # trace anywhere — indistinguishable from a legitimate "no launch
+        # template" ASG. It must now surface via writer.add_error (->
+        # scan_errors) while still not aborting the rest of the region.
+        w = MagicMock()
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '2'},
+        }
+        ec2_client = MagicMock()
+        ec2_client.describe_launch_template_versions.side_effect = RuntimeError('AccessDenied')
+        with patch.object(m.boto3, 'client', side_effect=_clients(_asg_client([asg]), ec2_client)):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplatePublicIp'] is None
+        w.add_error.assert_called_once()
+        args = w.add_error.call_args[0]
+        assert args[0] == 'us-east-1'
+        assert 'web-asg' in args[2] and 'AccessDenied' in args[2]
+        w.add_resource.assert_called_once()  # still gathered despite the lookup failure
+
 
 class TestLaunchTemplateSpec:
     def test_reads_the_top_level_launch_template(self):
@@ -108,12 +132,16 @@ class TestLaunchesWithPublicIp:
         with patch.object(m.boto3, 'client', return_value=_asg_client(launch_configs=[])):
             assert m._launches_with_public_ip(asg, 'us-east-1') is None
 
-    def test_launch_configuration_lookup_error_returns_none(self):
+    def test_launch_configuration_lookup_error_propagates(self):
+        # Raises rather than swallowing — gather() is the error boundary
+        # (see its own test in TestGather), not this function; a silently
+        # eaten exception here would be indistinguishable from a
+        # legitimate "no launch configuration" ASG.
         asg = {'LaunchConfigurationName': 'lc-1'}
         asg_client = MagicMock()
         asg_client.describe_launch_configurations.side_effect = RuntimeError('boom')
-        with patch.object(m.boto3, 'client', return_value=asg_client):
-            assert m._launches_with_public_ip(asg, 'us-east-1') is None
+        with patch.object(m.boto3, 'client', return_value=asg_client), pytest.raises(RuntimeError, match='boom'):
+            m._launches_with_public_ip(asg, 'us-east-1')
 
     def test_launch_template_by_id_true(self):
         asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
@@ -138,12 +166,12 @@ class TestLaunchesWithPublicIp:
         with patch.object(m.boto3, 'client', return_value=_ec2_client([])):
             assert m._launches_with_public_ip(asg, 'us-east-1') is None
 
-    def test_launch_template_lookup_error_returns_none(self):
+    def test_launch_template_lookup_error_propagates(self):
         asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
         ec2_client = MagicMock()
         ec2_client.describe_launch_template_versions.side_effect = RuntimeError('boom')
-        with patch.object(m.boto3, 'client', return_value=ec2_client):
-            assert m._launches_with_public_ip(asg, 'us-east-1') is None
+        with patch.object(m.boto3, 'client', return_value=ec2_client), pytest.raises(RuntimeError, match='boom'):
+            m._launches_with_public_ip(asg, 'us-east-1')
 
     def test_no_launch_template_or_configuration_returns_none(self):
         assert m._launches_with_public_ip({}, 'us-east-1') is None
