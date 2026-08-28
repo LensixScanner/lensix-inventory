@@ -155,6 +155,59 @@ def get_project_metadata_items(compute, project_id):
     return resp.get('commonInstanceMetadata', {}).get('items') or []
 
 
+def _mig_instance_template_name(mig):
+    """Same fallback compute_import.py's own _mig_template() uses —
+    the MIG's top-level instanceTemplate reference first, falling back to
+    the first entry in `versions` for a MIG using multiple template
+    versions (a canary rollout). Only the primary reference is checked
+    here, the same simplification AWS's ASG launch-template lookup makes
+    for MixedInstancesPolicy — see autoscaling.py's own
+    _launches_with_public_ip docstring. Returns just the template's own
+    name (the API wants that, not the full selfLink URL the MIG's raw
+    record carries)."""
+    template_url = mig.get('instanceTemplate') or (mig.get('versions') or [{}])[0].get('instanceTemplate', '')
+    return template_url.rsplit('/', 1)[-1] if template_url else None
+
+
+def _network_interfaces_have_access_config(network_interfaces):
+    """True if any network interface in an instance template's own
+    `properties` declares an accessConfigs entry at all. Unlike a LIVE
+    instance — where accessConfigs[].natIP holds the actual assigned IP
+    address, see compute_import.py's own _has_public_ip — a TEMPLATE's
+    accessConfigs entries never carry a concrete IP at all (that's only
+    assigned once a real instance is created from the template); the
+    entry's mere PRESENCE is what causes GCP to allocate an ephemeral
+    external IP for every instance the template produces. False if
+    network interfaces are declared but none of them have any
+    accessConfigs entries; None if there's no network interface data to
+    judge from at all (a deleted/inaccessible template)."""
+    if network_interfaces is None:
+        return None
+    for iface in network_interfaces:
+        if iface.get('accessConfigs'):
+            return True
+    return False
+
+
+def _mig_launches_with_public_ip(compute, project_id, mig):
+    """True/False/None for whether this MIG's instance template assigns
+    instances an external IP — None when the MIG has no resolvable
+    template reference, or the template lookup returns no network
+    interface data to judge from. Any lookup FAILURE (permission denied,
+    throttling, a deleted template returning an HttpError, ...) raises
+    instead of returning None — gather()'s own caller is the error
+    boundary (see its own comment), matching the discipline
+    autoscaling.py's _launches_with_public_ip follows after an earlier
+    version of that function silently swallowed lookup failures with
+    zero trace anywhere."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    network_interfaces = (template.get('properties') or {}).get('networkInterfaces')
+    return _network_interfaces_have_access_config(network_interfaces)
+
+
 def gather(project_id, credentials, writer):
     """Gathers all Compute Engine-owned resource types for this project into
     `writer`."""
@@ -242,6 +295,16 @@ def gather(project_id, credentials, writer):
     for zone, mig in migs:
         raw = dict(mig)
         raw['_Autoscaler'] = autoscalers_by_target.get(mig.get('selfLink', ''))
+        try:
+            raw['_InstanceTemplatePublicIp'] = _mig_launches_with_public_ip(compute, project_id, mig)
+        except Exception as e:
+            # One MIG's template lookup failing doesn't abort the rest of
+            # the region — recorded via add_error (-> scan_errors) rather
+            # than swallowed, same reasoning as autoscaling.py's own
+            # equivalent gather() loop.
+            raw['_InstanceTemplatePublicIp'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
         writer.add_resource(
             resource_type='instance_group_manager',
             region=zone,

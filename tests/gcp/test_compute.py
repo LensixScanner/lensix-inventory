@@ -125,3 +125,119 @@ class TestGatherMetadataIntegration:
         raw = calls['compute_project_metadata'].kwargs['raw']
         assert raw['itemValues'] == {'ssh-keys': 'alice:ssh-rsa AAAA...'}
         assert set(raw['itemKeys']) == {'ssh-keys', 'other-key'}
+
+
+class TestMigInstanceTemplateName:
+    def test_reads_the_top_level_reference(self):
+        mig = {'instanceTemplate': 'https://www.googleapis.com/compute/v1/projects/p/global/instanceTemplates/web-template'}
+        assert m._mig_instance_template_name(mig) == 'web-template'
+
+    def test_falls_back_to_the_first_version_for_a_canary_rollout(self):
+        mig = {'versions': [{'instanceTemplate': 'https://.../instanceTemplates/v2-template'}]}
+        assert m._mig_instance_template_name(mig) == 'v2-template'
+
+    def test_none_when_neither_is_present(self):
+        assert m._mig_instance_template_name({}) is None
+
+
+class TestNetworkInterfacesHaveAccessConfig:
+    def test_true_when_any_interface_has_an_access_config(self):
+        nis = [{'accessConfigs': []}, {'accessConfigs': [{'type': 'ONE_TO_ONE_NAT'}]}]
+        assert m._network_interfaces_have_access_config(nis) is True
+
+    def test_false_when_no_interface_has_one(self):
+        nis = [{'network': 'default'}, {'accessConfigs': []}]
+        assert m._network_interfaces_have_access_config(nis) is False
+
+    def test_none_for_no_network_interface_data_at_all(self):
+        assert m._network_interfaces_have_access_config(None) is None
+
+    def test_false_for_an_empty_list(self):
+        assert m._network_interfaces_have_access_config([]) is False
+
+
+class TestMigLaunchesWithPublicIp:
+    def test_true_when_the_template_has_an_access_config(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'networkInterfaces': [{'accessConfigs': [{'type': 'ONE_TO_ONE_NAT'}]}]},
+        }
+        assert m._mig_launches_with_public_ip(compute, 'proj-1', mig) is True
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_false_when_the_template_has_no_access_config(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'networkInterfaces': [{'network': 'default'}]},
+        }
+        assert m._mig_launches_with_public_ip(compute, 'proj-1', mig) is False
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_launches_with_public_ip(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_lookup_returns_no_network_interfaces(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_launches_with_public_ip(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_launches_with_public_ip(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
+class TestGatherMigPublicIpIntegration:
+    def _compute_with_mig(self, mig, template_response=None, template_side_effect=None):
+        compute = MagicMock()
+        compute.instances.return_value.aggregatedList.return_value = _paged(aggregated={})
+        compute.instances.return_value.aggregatedList_next.return_value = None
+        compute.images.return_value.list.return_value = _paged(items=[])
+        compute.images.return_value.list_next.return_value = None
+        compute.snapshots.return_value.list.return_value = _paged(items=[])
+        compute.snapshots.return_value.list_next.return_value = None
+        compute.instanceGroupManagers.return_value.aggregatedList.return_value = _paged(
+            aggregated={'zones/us-central1-a': {'instanceGroupManagers': [mig]}})
+        compute.instanceGroupManagers.return_value.aggregatedList_next.return_value = None
+        compute.autoscalers.return_value.aggregatedList.return_value = _paged(aggregated={})
+        compute.autoscalers.return_value.aggregatedList_next.return_value = None
+        compute.projects.return_value.get.return_value.execute.return_value = {'commonInstanceMetadata': {'items': []}}
+        if template_side_effect is not None:
+            compute.instanceTemplates.return_value.get.return_value.execute.side_effect = template_side_effect
+        else:
+            compute.instanceTemplates.return_value.get.return_value.execute.return_value = template_response or {}
+        return compute
+
+    def test_mig_resource_carries_the_public_ip_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'networkInterfaces': [{'accessConfigs': [{'type': 'ONE_TO_ONE_NAT'}]}]},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplatePublicIp'] is True
+
+    def test_a_template_lookup_failure_is_recorded_not_swallowed(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_side_effect=RuntimeError('AccessDenied'))
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplatePublicIp'] is None
+        w.add_error.assert_called_once()
+        args = w.add_error.call_args
+        assert 'web-mig' in args.kwargs['message'] and 'AccessDenied' in args.kwargs['message']
