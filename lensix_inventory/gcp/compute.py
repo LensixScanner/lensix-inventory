@@ -18,13 +18,16 @@ carry hardcoded credentials. Those values are scanned locally for secrets
 and discarded immediately; only the metadata KEY names and the scan result
 travel in the uploaded record, never the values themselves — with one
 narrow exception (`_CHECK_RELEVANT_METADATA_KEYS`): serial-port-enable,
-enable-oslogin, enable-oslogin-2fa, and ssh-keys are known config flags
-(ssh-keys holds public keys, not secrets — public by definition) that
-several checks need the actual value of, not just "is this key present."
-Their values are still scanned for secrets like every other key (in case
-a customer stashed something unexpected in one), but also kept verbatim
-in `itemValues`, so those checks can read them without a second live
-call.
+enable-oslogin, enable-oslogin-2fa, ssh-keys, and created-by are known,
+non-secret config values (ssh-keys holds public keys, not secrets — public
+by definition; created-by is the launching Managed Instance Group's own
+resource path, not customer data) that several checks — and, for
+created-by, the scanner-light noise-reduction grouping that collapses a
+MIG's instances into one row — need the actual value of, not just "is
+this key present." Their values are still scanned for secrets like every
+other key (in case a customer stashed something unexpected in one), but
+also kept verbatim in `itemValues`, so those checks can read them without
+a second live call.
 
 GCP resources are project-scoped, not per-region like AWS — every list call
 below is an aggregatedList/list(project=...) call that already covers every
@@ -56,9 +59,11 @@ def _instance_network(instance):
 
 
 # The only metadata keys whose VALUE (not just its presence) is kept —
-# see the module docstring's "Secrets exception" for why these four are
-# safe: config flags or public keys, not secret-bearing free text.
-_CHECK_RELEVANT_METADATA_KEYS = {'serial-port-enable', 'enable-oslogin', 'enable-oslogin-2fa', 'ssh-keys'}
+# see the module docstring's "Secrets exception" for why these five are
+# safe: config flags, public keys, or (created-by) GCP's own resource path
+# for the MIG that launched this instance — never secret-bearing free
+# text.
+_CHECK_RELEVANT_METADATA_KEYS = {'serial-port-enable', 'enable-oslogin', 'enable-oslogin-2fa', 'ssh-keys', 'created-by'}
 
 
 def _redact_metadata(items):

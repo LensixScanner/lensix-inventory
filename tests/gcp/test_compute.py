@@ -45,6 +45,13 @@ class TestRedactMetadata:
         }
         assert set(key_names) == set(relevant.keys())
 
+    def test_created_by_keeps_its_value_for_scaling_group_grouping(self):
+        mig_path = 'projects/p/zones/us-central1-a/instanceGroupManagers/web-mig'
+        items = [{'key': 'created-by', 'value': mig_path}]
+        key_names, hits, relevant = m._redact_metadata(items)
+        assert relevant == {'created-by': mig_path}
+        assert key_names == ['created-by']
+
     def test_relevant_key_values_are_still_scanned_for_secrets(self):
         secret_value = 'AKIAABCDEFGHIJKLMNOP'
         items = [{'key': 'ssh-keys', 'value': secret_value}]
