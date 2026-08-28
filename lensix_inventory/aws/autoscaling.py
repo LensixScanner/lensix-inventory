@@ -77,38 +77,36 @@ def _network_interfaces_associate_public_ip(network_interfaces):
 
 def _launches_with_public_ip(asg, region):
     """True/False/None for whether this ASG's launch template or launch
-    configuration assigns instances a public IP — None on any lookup
-    failure (deleted template, access denied, ...) or when it can't be
-    determined, same "don't fail the whole gather over one ASG" spirit as
-    everywhere else in this module. Builds its own client per call, same
-    convention as ec2.py's own get_launch_template_default_version — no
-    live call happens for an ASG that references neither a launch
-    template nor a launch configuration (in principle possible, though
-    AWS requires one of the two in practice)."""
+    configuration assigns instances a public IP — None when it can't be
+    determined (no launch template/configuration referenced at all, or
+    the referenced version/name no longer exists). Any lookup FAILURE
+    (permission denied, throttling, ...) raises instead of returning None
+    — silently returning None there would be indistinguishable from a
+    legitimate "no launch template" ASG, hiding a real problem from
+    gather()'s own error reporting (see its own try/except below). Builds
+    its own client per call, same convention as ec2.py's own
+    get_launch_template_default_version — no live call happens for an ASG
+    that references neither a launch template nor a launch configuration
+    (in principle possible, though AWS requires one of the two in
+    practice)."""
     lc_name = asg.get('LaunchConfigurationName')
     if lc_name:
-        try:
-            asg_client = boto3.client('autoscaling', region_name=region, config=_BOTO_CFG)
-            lcs = asg_client.describe_launch_configurations(
-                LaunchConfigurationNames=[lc_name],
-            )['LaunchConfigurations']
-        except Exception:
-            return None
+        asg_client = boto3.client('autoscaling', region_name=region, config=_BOTO_CFG)
+        lcs = asg_client.describe_launch_configurations(
+            LaunchConfigurationNames=[lc_name],
+        )['LaunchConfigurations']
         return lcs[0].get('AssociatePublicIpAddress') if lcs else None
 
     lt = _launch_template_spec(asg)
     if not lt:
         return None
-    try:
-        ec2_client = boto3.client('ec2', region_name=region, config=_BOTO_CFG)
-        kwargs = {'Versions': [str(lt.get('Version') or '$Default')]}
-        if lt.get('LaunchTemplateId'):
-            kwargs['LaunchTemplateId'] = lt['LaunchTemplateId']
-        else:
-            kwargs['LaunchTemplateName'] = lt['LaunchTemplateName']
-        versions = ec2_client.describe_launch_template_versions(**kwargs)['LaunchTemplateVersions']
-    except Exception:
-        return None
+    ec2_client = boto3.client('ec2', region_name=region, config=_BOTO_CFG)
+    kwargs = {'Versions': [str(lt.get('Version') or '$Default')]}
+    if lt.get('LaunchTemplateId'):
+        kwargs['LaunchTemplateId'] = lt['LaunchTemplateId']
+    else:
+        kwargs['LaunchTemplateName'] = lt['LaunchTemplateName']
+    versions = ec2_client.describe_launch_template_versions(**kwargs)['LaunchTemplateVersions']
     if not versions:
         return None
     network_interfaces = versions[0].get('LaunchTemplateData', {}).get('NetworkInterfaces', [])
@@ -119,8 +117,17 @@ def gather(region, writer):
     for asg in get_asgs(region):
         try:
             asg['_LaunchTemplatePublicIp'] = _launches_with_public_ip(asg, region)
-        except Exception:
+        except Exception as e:
+            # Recorded via writer.add_error (-> scan_errors, same as every
+            # other gather failure in this codebase) rather than swallowed
+            # — a previous version of this function ate this exception
+            # silently, which would have made a real permissions/API
+            # problem indistinguishable from "no launch template" with
+            # zero trace anywhere. One ASG's lookup failing still doesn't
+            # abort the whole region's gather.
             asg['_LaunchTemplatePublicIp'] = None
+            writer.add_error(region, 'autoscaling launch template/configuration lookup',
+                              f"{asg.get('AutoScalingGroupName', asg.get('AutoScalingGroupARN'))}: {e}")
         writer.add_resource(
             resource_type='autoscaling_group',
             region=region,
