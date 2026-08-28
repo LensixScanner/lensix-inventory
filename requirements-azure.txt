@@ -1,33 +1,85 @@
 azure-identity>=1.15
 azure-core>=1.29
-azure-mgmt-compute>=30.0
-azure-mgmt-network>=25.0
-azure-mgmt-storage>=21.0
+# <38.0: VirtualMachine.as_dict() nests storage_profile/os_profile/
+# diagnostics_profile/etc. under 'properties' at 38.0.0; vm.py's gather()
+# and downstream checks read them flat.
+azure-mgmt-compute>=30.0,<38.0
+# <32.0: NetworkSecurityGroup.as_dict() nests security_rules under
+# 'properties' at 32.0.0; nsg_import.py reads it flat. Kept in sync with
+# pyproject.toml's azure extra below.
+azure-mgmt-network>=25.0,<32.0
+# <25.1: StorageAccount.as_dict() nests enable_https_traffic_only/
+# network_rule_set/encryption/etc. under 'properties' at 25.1.0;
+# storage_import.py reads them flat.
+azure-mgmt-storage>=21.0,<25.1
 # <25.0: 25.0.0 dropped the azure.mgmt.resource top-level re-export of
-# PolicyClient (needed by lensix_inventory/azure/policy.py) and the
-# azure.mgmt.resource.locks submodule; last confirmed-working release is
-# 24.0.0.
+# PolicyClient (needed by policy.py) and the azure.mgmt.resource.locks
+# submodule.
 azure-mgmt-resource>=23.0,<25.0
 azure-mgmt-subscription>=3.0
-azure-mgmt-monitor>=6.0
-azure-mgmt-containerservice>=29.0
-azure-mgmt-containerregistry>=10.0
+# <7.0: 7.0.0 removes the diagnostic_settings operations group from
+# MonitorManagementClient entirely — every module reading diagnostic
+# settings (nsg, lb, keyvault, cdn, aks, rsv, activitylog, eventgrid,
+# monitor itself) depends on it.
+azure-mgmt-monitor>=6.0,<7.0
+# <41.6: ManagedCluster.as_dict() nests enable_rbac/etc. under
+# 'properties' at 41.6.0; aks_import.py reads it flat.
+azure-mgmt-containerservice>=29.0,<41.6
+# <15.0: Registry.as_dict() nests admin_user_enabled/etc. under
+# 'properties' at 15.0.0; acr_import.py reads it flat.
+azure-mgmt-containerregistry>=10.0,<15.0
+# containerapps.py imports this directly but it was missing here, so a
+# standalone install never pulled it in.
+# <5.0: ContainerApp.as_dict() nests configuration/identity/etc. under
+# 'properties' at 5.0.0; containerapps_import.py reads it flat.
+azure-mgmt-appcontainers>=1.0,<5.0
 azure-mgmt-apimanagement>=4.0
-azure-mgmt-web>=7.0
+# <11.0.1: Site.as_dict() nests https_only/etc. under 'properties' at
+# 11.0.1; appservice_import.py reads it flat.
+azure-mgmt-web>=7.0,<11.0.1
 azure-mgmt-authorization>=4.0
-azure-mgmt-cdn>=12.0
-azure-mgmt-cosmosdb>=9.0
-azure-mgmt-datafactory>=3.0
+# <14.0: Profile.as_dict() nests origin_response_timeout_seconds/etc.
+# under 'properties' at 14.0.0; cdn_import.py reads it flat.
+azure-mgmt-cdn>=12.0,<14.0
+# <10.0: DatabaseAccountCreateUpdateParameters.as_dict() nests
+# is_virtual_network_filter_enabled/etc. under 'properties' at 10.0.0;
+# cosmosdb_import.py reads it flat.
+azure-mgmt-cosmosdb>=9.0,<10.0
+# <10.0: Factory.as_dict() nests public_network_access under 'properties'
+# at 10.0.0; datafactory_import.py reads it flat.
+azure-mgmt-datafactory>=3.0,<10.0
 azure-mgmt-datalake-store>=0.5
 azure-mgmt-security>=5.0
 azure-mgmt-eventgrid>=10.0
-azure-mgmt-eventhub>=10.0
-azure-mgmt-frontdoor>=1.0
+# <12.0: EHNamespace.as_dict() nests is_auto_inflate_enabled/etc. under
+# 'properties' at 12.0.0; eventhub_import.py reads it flat.
+azure-mgmt-eventhub>=10.0,<12.0
+# <2.0: FrontDoor.as_dict() nests enabled_state/etc. under 'properties'
+# at 2.0.0; frontdoor_import.py reads it flat.
+azure-mgmt-frontdoor>=1.0,<2.0
 azure-mgmt-rdbms>=10.0
-azure-mgmt-recoveryservices>=3.0
+# <4.0: Vault.as_dict()'s properties.encryption is already nested at the
+# floor with snake_case sub-keys (key_vault_properties,
+# infrastructure_encryption), matching rsv_import.py's read; those go
+# camelCase at 4.0.0.
+azure-mgmt-recoveryservices>=3.0,<4.0
 azure-mgmt-redis>=14.0
-azure-mgmt-servicebus>=8.0
-azure-mgmt-sql>=4.0
+# <10.0: SBNamespace goes fully nested at 10.0.0. At this floor,
+# disable_local_auth/encryption are flat (servicebus_nocmk/localauth
+# work); public_network_access/minimum_tls_version were never modeled
+# flat at any version, so servicebus_publicaccess/oldtls stay unable to
+# fire until the nested-shape rewrite.
+azure-mgmt-servicebus>=8.0,<10.0
+# <4.0: Server.as_dict() nests minimal_tls_version/etc. under
+# 'properties' at 4.0.0; sql_import.py reads it flat. Floor lowered from
+# 4.0 (already the first broken release) to 3.0.
+azure-mgmt-sql>=3.0,<4.0
 azure-mgmt-synapse>=2.0
+# keyvault.py imports this directly but it was missing here, so a
+# standalone install never pulled it in.
+# <13.0: VaultProperties.as_dict() is already nested at the floor with
+# snake_case keys (enable_soft_delete, tenant_id, ...), matching
+# keyvault_import.py's read; those go camelCase at 13.0.0.
+azure-mgmt-keyvault>=10.0,<13.0
 azure-keyvault-keys>=4.8
 azure-keyvault-secrets>=4.7
