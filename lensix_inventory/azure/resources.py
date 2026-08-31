@@ -29,13 +29,15 @@ def gather(credential, subscription_id, writer):
 
     for rg in resource_groups:
         region = rg.location or 'global'
+        rg_raw = rg.as_dict()
         writer.add_resource(
             resource_type='resource_group',
             region=region,
             resource_id=rg.id,
             resource_name=rg.name,
             scope_id=rg.name,
-            raw=rg.as_dict(),
+            raw=rg_raw,
+            tags=rg_raw.get('tags'),
         )
 
         try:
@@ -45,6 +47,10 @@ def gather(credential, subscription_id, writer):
             continue
 
         for lock in locks:
+            # No tags= here: ManagementLockObject has no `tags` field on
+            # its own SDK model (confirmed — the SDK itself warns and
+            # discards it if passed), a control-plane object like
+            # authorization's role_definition/policy's policy_assignment.
             writer.add_resource(
                 resource_type='management_lock',
                 region=region,

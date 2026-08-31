@@ -94,6 +94,7 @@ def gather(region, writer):
             writer.add_resource(
                 resource_type='ebs_volume', region=region, resource_id=vol['VolumeId'],
                 resource_name=_tag_name(vol.get('Tags'), vol['VolumeId']), raw=vol,
+                tags=vol.get('Tags'),
             )
     except Exception as e:
         writer.add_error(region=region, source='ebs (volumes)', message=e)
@@ -106,6 +107,7 @@ def gather(region, writer):
             writer.add_resource(
                 resource_type='ebs_snapshot', region=region, resource_id=snap['SnapshotId'],
                 resource_name=_tag_name(snap.get('Tags'), snap['SnapshotId']), raw=raw,
+                tags=snap.get('Tags'),
             )
     except Exception as e:
         writer.add_error(region=region, source='ebs (snapshots)', message=e)
@@ -115,6 +117,7 @@ def gather(region, writer):
             writer.add_resource(
                 resource_type='ebs_ami', region=region, resource_id=ami['ImageId'],
                 resource_name=ami.get('Name', ami['ImageId']), raw=ami,
+                tags=ami.get('Tags'),
             )
     except Exception as e:
         writer.add_error(region=region, source='ebs (amis)', message=e)

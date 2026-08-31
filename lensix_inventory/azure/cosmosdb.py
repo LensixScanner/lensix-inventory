@@ -40,4 +40,5 @@ def gather(credential, subscription_id, writer):
             resource_name=account.name,
             scope_id=_resource_group(account.id),
             raw=raw,
+            tags=raw.get('tags'),
         )

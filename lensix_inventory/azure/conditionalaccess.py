@@ -48,6 +48,16 @@ def gather(credential, subscription_id, writer):
 
     for policy in policies:
         policy_id = policy.get('id')
+        # No tags= here: conditionalAccessPolicy is a Microsoft Graph
+        # (Entra ID) object, not an ARM resource — Entra ID objects have
+        # no `tags` concept at all, unlike ARM's ubiquitous `tags`
+        # property, so there's genuinely nothing to pass through. Same
+        # architectural N/A class as authorization.py's role_definition/
+        # policy.py's policy_assignment (see docs/tag-suppressions.md).
+        # The module's own single check (conditionalaccess_
+        # nosigninfrequency) is also a subscription-wide aggregate over
+        # the whole policy list, not per-policy, so per-check tag
+        # suppression couldn't apply here even if tags existed.
         writer.add_resource(
             resource_type='conditional_access_policy',
             region='global',

@@ -23,6 +23,17 @@ def get_domain_detail(region, name):
     return es.describe_elasticsearch_domain(DomainName=name)['DomainStatus']
 
 
+def get_domain_tags(region, arn):
+    """describe_elasticsearch_domain doesn't include tags — its own
+    separate, unpaginated list_tags call, keyed by ARN. Returns [] on
+    failure."""
+    es = boto3.client('es', region_name=region)
+    try:
+        return es.list_tags(ARN=arn).get('TagList', [])
+    except Exception:
+        return []
+
+
 def gather(region, writer):
     for name in get_domains(region):
         try:
@@ -37,4 +48,5 @@ def gather(region, writer):
             resource_name=name,
             scope_id=domain.get('VPCOptions', {}).get('VPCId') if domain.get('VPCOptions') else None,
             raw=domain,
+            tags=get_domain_tags(region, domain['ARN']),
         )

@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='frontdoor_profile', region='global', resource_id=fd.id,
             resource_name='fd1', scope_id='my-rg', raw={'id': fd.id, 'name': 'fd1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        fd = _front_door()
+        fd.as_dict.return_value = {'id': fd.id, 'name': 'fd1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.front_doors.list.return_value = [fd]
+        with patch.object(m, 'FrontDoorManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_global_when_location_attribute_is_entirely_absent(self):
         # Uses getattr(fd, 'location', None), unlike most other Azure

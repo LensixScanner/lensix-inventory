@@ -103,4 +103,5 @@ def gather(project_id, credentials, writer):
             resource_name=short_name,
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=raw.get('labels'),
         )

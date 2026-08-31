@@ -40,6 +40,33 @@ def _client(items=None, raising_ops=None, vpn_gateways=None, vpn_gateways_raise=
     return client
 
 
+class TestGatherTagPassthrough:
+    def test_every_tag_bearing_resource_type_passes_its_own_tags_through(self):
+        # All nine resource types here read from EC2's own describe_*
+        # responses, which all carry a plain 'Tags' list — one composite
+        # test covering every add_resource() call site rather than nine
+        # near-identical ones.
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        w = MagicMock()
+        items = {
+            'describe_vpcs':                     [{'VpcId': 'vpc-1', 'Tags': tags}],
+            'describe_subnets':                  [{'SubnetId': 'subnet-1', 'Tags': tags}],
+            'describe_route_tables':              [{'RouteTableId': 'rtb-1', 'Tags': tags}],
+            'describe_nat_gateways':              [{'NatGatewayId': 'nat-1', 'Tags': tags}],
+            'describe_internet_gateways':         [{'InternetGatewayId': 'igw-1', 'Tags': tags, 'Attachments': []}],
+            'describe_network_acls':              [{'NetworkAclId': 'acl-1', 'Tags': tags}],
+            'describe_vpc_endpoints':              [{'VpcEndpointId': 'vpce-1', 'Tags': tags}],
+            'describe_vpc_peering_connections':   [{'VpcPeeringConnectionId': 'pcx-1', 'Tags': tags}],
+            'describe_transit_gateways':          [{'TransitGatewayId': 'tgw-1', 'Tags': tags}],
+        }
+        with patch.object(m.boto3, 'client', return_value=_client(items, vpn_gateways=[{'VpnGatewayId': 'vgw-1', 'Tags': tags}])):
+            m.gather('us-east-1', w)
+        calls_by_type = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        for rtype in ('vpc', 'subnet', 'route_table', 'nat_gateway', 'internet_gateway',
+                      'vpn_gateway', 'network_acl', 'vpc_endpoint', 'vpc_peering', 'transit_gateway'):
+            assert calls_by_type[rtype].kwargs['tags'] == tags, f'{rtype} did not pass tags through'
+
+
 class TestTagName:
     def test_uses_the_name_tag(self):
         assert m._tag_name([{'Key': 'Name', 'Value': 'prod-vpc'}], 'vpc-1') == 'prod-vpc'

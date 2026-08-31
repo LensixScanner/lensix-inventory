@@ -16,11 +16,13 @@ def get_accounts(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for account in get_accounts(credential, subscription_id):
+        raw = _as_dict(account)
         writer.add_resource(
             resource_type='data_lake_store',
             region=account.location or 'global',
             resource_id=account.id,
             resource_name=account.name,
             scope_id=_resource_group(account.id),
-            raw=_as_dict(account),
+            raw=raw,
+            tags=raw.get('tags'),
         )

@@ -69,6 +69,19 @@ def get_bucket_metadata(s3, bucket_name, account_id):
     }
 
 
+def get_bucket_tags(s3, bucket_name):
+    """Returns the bucket's own Tags list (AWS's usual [{'Key','Value'},
+    ...] shape), or None if it has no tags at all (get_bucket_tagging
+    throws NoSuchTagSet — that's normal, not an error) or the fetch
+    otherwise failed. None (not []) so a caller checking `tags is None`
+    can distinguish "confirmed no tags" isn't needed here — either way,
+    nothing to suppress."""
+    result = _try(s3.get_bucket_tagging, Bucket=bucket_name)
+    if isinstance(result, dict) and 'TagSet' in result:
+        return result['TagSet']
+    return None
+
+
 def gather(writer, account_id):
     s3 = boto3.client('s3', region_name='us-east-1')
     for bucket in get_buckets():
@@ -83,6 +96,7 @@ def gather(writer, account_id):
                 resource_id=name,
                 resource_name=name,
                 raw=raw,
+                tags=get_bucket_tags(s3, name),
             )
         except Exception as e:
             writer.add_error(region=region, source=f's3_bucket:{name}', message=e)

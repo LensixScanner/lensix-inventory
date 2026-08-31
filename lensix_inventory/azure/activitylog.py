@@ -17,11 +17,13 @@ def get_activity_log_alerts(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for alert in get_activity_log_alerts(credential, subscription_id):
+        raw = _as_dict(alert)
         writer.add_resource(
             resource_type='activity_log_alert',
             region='global',
             resource_id=alert.id,
             resource_name=alert.name,
             scope_id=_resource_group(alert.id),
-            raw=_as_dict(alert),
+            raw=raw,
+            tags=raw.get('tags'),
         )

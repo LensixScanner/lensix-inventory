@@ -135,6 +135,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='vpc', region=region, resource_id=vpc_id,
             resource_name=_tag_name(vpc.get('Tags'), vpc_id), scope_id=vpc_id, raw=raw,
+            tags=vpc.get('Tags'),
         )
 
     try:
@@ -146,6 +147,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='subnet', region=region, resource_id=s['SubnetId'],
             resource_name=_tag_name(s.get('Tags'), s['SubnetId']), scope_id=s.get('VpcId'), raw=s,
+            tags=s.get('Tags'),
         )
 
     try:
@@ -157,6 +159,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='route_table', region=region, resource_id=rt['RouteTableId'],
             resource_name=_tag_name(rt.get('Tags'), rt['RouteTableId']), scope_id=rt.get('VpcId'), raw=rt,
+            tags=rt.get('Tags'),
         )
 
     try:
@@ -168,6 +171,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='nat_gateway', region=region, resource_id=nat['NatGatewayId'],
             resource_name=_tag_name(nat.get('Tags'), nat['NatGatewayId']), scope_id=nat.get('VpcId'), raw=nat,
+            tags=nat.get('Tags'),
         )
 
     try:
@@ -180,6 +184,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='internet_gateway', region=region, resource_id=igw['InternetGatewayId'],
             resource_name=_tag_name(igw.get('Tags'), igw['InternetGatewayId']), scope_id=vpc_id, raw=igw,
+            tags=igw.get('Tags'),
         )
 
     try:
@@ -192,6 +197,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='vpn_gateway', region=region, resource_id=vgw['VpnGatewayId'],
             resource_name=_tag_name(vgw.get('Tags'), vgw['VpnGatewayId']), scope_id=vpc_id, raw=vgw,
+            tags=vgw.get('Tags'),
         )
 
     try:
@@ -203,6 +209,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='network_acl', region=region, resource_id=nacl['NetworkAclId'],
             resource_name=_tag_name(nacl.get('Tags'), nacl['NetworkAclId']), scope_id=nacl.get('VpcId'), raw=nacl,
+            tags=nacl.get('Tags'),
         )
 
     try:
@@ -214,6 +221,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='vpc_endpoint', region=region, resource_id=ep['VpcEndpointId'],
             resource_name=ep.get('ServiceName', ep['VpcEndpointId']), scope_id=ep.get('VpcId'), raw=ep,
+            tags=ep.get('Tags'),
         )
 
     try:
@@ -226,6 +234,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='vpc_peering', region=region, resource_id=pc['VpcPeeringConnectionId'],
             resource_name=_tag_name(pc.get('Tags'), pc['VpcPeeringConnectionId']), scope_id=vpc_id, raw=pc,
+            tags=pc.get('Tags'),
         )
 
     try:
@@ -237,4 +246,5 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='transit_gateway', region=region, resource_id=tgw['TransitGatewayId'],
             resource_name=_tag_name(tgw.get('Tags'), tgw['TransitGatewayId']), raw=tgw,
+            tags=tgw.get('Tags'),
         )

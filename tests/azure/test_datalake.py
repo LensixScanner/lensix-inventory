@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='data_lake_store', region='eastus', resource_id=account.id,
             resource_name='a1', scope_id='my-rg', raw={'id': account.id, 'name': 'a1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        account = _account()
+        account.as_dict.return_value = {'id': account.id, 'name': 'a1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.accounts.list.return_value = [account]
+        with patch.object(m, 'DataLakeStoreAccountManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_accounts_gathers_nothing(self):
         w = MagicMock()

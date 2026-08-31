@@ -51,4 +51,5 @@ def gather(region, writer):
             resource_id=server_id,
             resource_name=_server_name(server),
             raw=server,
+            tags=server.get('Tags'),
         )

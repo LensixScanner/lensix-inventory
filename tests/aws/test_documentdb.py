@@ -28,8 +28,17 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='docdb_cluster', region='us-east-1',
-            resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster,
+            resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster, tags=None,
         )
+
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'Engine': 'docdb', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        rds = _rds([cluster])
+        with patch.object(m.boto3, 'client', return_value=rds):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == cluster['TagList']
 
     def test_no_docdb_clusters_gathers_nothing(self):
         w = MagicMock()

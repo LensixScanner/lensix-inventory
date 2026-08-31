@@ -45,4 +45,5 @@ def gather(credential, subscription_id, writer):
             resource_name=vault.name,
             scope_id=_resource_group(vault.id),
             raw=raw,
+            tags=raw.get('tags'),
         )

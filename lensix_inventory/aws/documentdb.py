@@ -28,4 +28,5 @@ def gather(region, writer):
             resource_id=cluster['DBClusterArn'],
             resource_name=cluster['DBClusterIdentifier'],
             raw=cluster,
+            tags=cluster.get('TagList'),
         )

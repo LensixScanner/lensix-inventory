@@ -48,8 +48,17 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='transfer_server', region='us-east-1',
-            resource_id='s-1', resource_name='sftp-prod', raw=detail,
+            resource_id='s-1', resource_name='sftp-prod', raw=detail, tags=detail['Tags'],
         )
+
+    def test_server_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        detail = {'ServerId': 's-1', 'Tags': tags}
+        client = _tf_client([{'Servers': [{'ServerId': 's-1'}]}], detail_by_id={'s-1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_a_describe_failure_for_one_server_does_not_abort_the_others(self):
         w = MagicMock()

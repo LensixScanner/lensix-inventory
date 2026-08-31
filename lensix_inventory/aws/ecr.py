@@ -46,6 +46,17 @@ def get_repository_policy(region, name):
         return None
 
 
+def get_repository_tags(region, arn):
+    """ECR tags aren't part of describe_repositories' response — its own
+    separate, unpaginated list_tags_for_resource call, keyed by ARN.
+    Returns [] on failure."""
+    ecr = boto3.client('ecr', region_name=region)
+    try:
+        return ecr.list_tags_for_resource(resourceArn=arn).get('tags', [])
+    except Exception:
+        return []
+
+
 def gather(region, writer):
     scan_rules = get_registry_scan_rules(region)
     writer.add_resource(
@@ -56,12 +67,14 @@ def gather(region, writer):
 
     for repo in get_repositories(region):
         name = repo.get('repositoryName', '')
+        arn = repo.get('repositoryArn', '')
         raw = dict(repo)
         raw['_RepositoryPolicy'] = get_repository_policy(region, name)
         writer.add_resource(
             resource_type='ecr_repository',
             region=region,
-            resource_id=repo.get('repositoryArn', ''),
+            resource_id=arn,
             resource_name=name,
             raw=raw,
+            tags=get_repository_tags(region, arn),
         )

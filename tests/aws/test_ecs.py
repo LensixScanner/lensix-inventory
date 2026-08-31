@@ -7,7 +7,7 @@ import lensix_inventory.aws.ecs as m
 
 def _client(cluster_arns=None, clusters=None, families=None, task_def_by_family=None,
             task_def_error_families=None, list_clusters_raise=False, describe_clusters_raise=False,
-            list_families_raise=False):
+            list_families_raise=False, task_def_tags_by_family=None):
     client = MagicMock()
 
     def _get_paginator(op_name):
@@ -32,11 +32,13 @@ def _client(cluster_arns=None, clusters=None, families=None, task_def_by_family=
 
     task_def_by_family = task_def_by_family or {}
     task_def_error_families = task_def_error_families or set()
+    task_def_tags_by_family = task_def_tags_by_family or {}
 
-    def _describe_task_def(taskDefinition):
+    def _describe_task_def(taskDefinition, include=None):
         if taskDefinition in task_def_error_families:
             raise RuntimeError('boom')
-        return {'taskDefinition': task_def_by_family[taskDefinition]}
+        return {'taskDefinition': task_def_by_family[taskDefinition],
+                'tags': task_def_tags_by_family.get(taskDefinition, [])}
     client.describe_task_definition.side_effect = _describe_task_def
     return client
 
@@ -80,6 +82,18 @@ class TestGather:
         assert cluster_call.kwargs['resource_id'] == 'arn:aws:ecs:us-east-1:1:cluster/my-cluster'
         assert cluster_call.kwargs['resource_name'] == 'my-cluster'
 
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        # ECS tags use lowercase {'key','value'} dicts, not EC2-family's
+        # uppercase {'Key','Value'} — see _normalize_tags in
+        # lensix_inventory.common.output.
+        w = MagicMock()
+        cluster = {'clusterArn': 'arn:1', 'tags': [{'key': 'lensix-suppress', 'value': 'true'}]}
+        client = _client(cluster_arns=['arn:1'], clusters=[cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ecs_cluster'].kwargs['tags'] == cluster['tags']
+
     def test_no_cluster_arns_skips_the_describe_call_entirely(self):
         w = MagicMock()
         client = _client(cluster_arns=[])
@@ -106,6 +120,17 @@ class TestGather:
         assert task_call.kwargs['resource_id'] == 'arn:aws:ecs:us-east-1:1:task-definition/my-task:3'
         assert task_call.kwargs['resource_name'] == 'my-task:3'
         assert task_call.kwargs['raw']['containerDefinitions'][0]['environment'] == ['X']
+
+    def test_task_definition_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        task_def = {'taskDefinitionArn': 'arn:1', 'revision': 1, 'containerDefinitions': []}
+        tags = [{'key': 'lensix-suppress', 'value': 'true'}]
+        client = _client(families=['my-task'], task_def_by_family={'my-task': task_def},
+                          task_def_tags_by_family={'my-task': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ecs_task_definition'].kwargs['tags'] == tags
 
     def test_a_task_definition_describe_failure_does_not_abort_the_others(self):
         w = MagicMock()

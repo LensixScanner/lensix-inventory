@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='synapse_workspace', region='eastus', resource_id=ws.id,
             resource_name='w1', scope_id='my-rg', raw={'id': ws.id, 'name': 'w1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        ws = _workspace()
+        ws.as_dict.return_value = {'id': ws.id, 'name': 'w1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.workspaces.list.return_value = [ws]
+        with patch('azure.mgmt.synapse.SynapseManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_global_region_without_a_location(self):
         w = MagicMock()

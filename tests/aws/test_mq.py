@@ -40,8 +40,17 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='mq_broker', region='us-east-1',
-            resource_id='arn:aws:mq:us-east-1:1:broker:b1', resource_name='my-broker', raw=detail,
+            resource_id='arn:aws:mq:us-east-1:1:broker:b1', resource_name='my-broker', raw=detail, tags=None,
         )
+
+    def test_broker_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        summary = {'BrokerId': 'b1', 'BrokerName': 'my-broker'}
+        detail = {'BrokerArn': 'arn:1', 'BrokerName': 'my-broker', 'Tags': {'lensix-suppress': 'true'}}
+        client = _mq_client([{'BrokerSummaries': [summary]}], detail_by_id={'b1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_the_broker_id_when_arn_missing(self):
         w = MagicMock()

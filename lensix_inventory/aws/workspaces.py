@@ -31,6 +31,18 @@ def get_ip_groups(region):
     return items
 
 
+def get_tags(region, resource_id):
+    """describe_workspaces/describe_ip_groups/describe_workspace_directories
+    don't include tags — WorkSpaces' own describe_tags call, generic
+    across all three resource types, keyed by the resource's own id.
+    Returns [] on failure."""
+    client = boto3.client('workspaces', region_name=region)
+    try:
+        return client.describe_tags(ResourceId=resource_id).get('TagList', [])
+    except Exception:
+        return []
+
+
 def get_directories(region):
     client = boto3.client('workspaces', region_name=region)
     items = []
@@ -54,6 +66,7 @@ def gather(region, writer):
             resource_id=ws_id,
             resource_name=ws.get('ComputerName', ws_id),
             raw=ws,
+            tags=get_tags(region, ws_id),
         )
 
     try:
@@ -70,6 +83,7 @@ def gather(region, writer):
             resource_id=group_id,
             resource_name=group.get('groupName', group_id),
             raw=group,
+            tags=get_tags(region, group_id),
         )
 
     try:
@@ -86,4 +100,5 @@ def gather(region, writer):
             resource_id=directory_id,
             resource_name=directory.get('DirectoryName', directory_id),
             raw=directory,
+            tags=get_tags(region, directory_id),
         )

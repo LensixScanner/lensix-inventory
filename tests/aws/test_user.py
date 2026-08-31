@@ -26,13 +26,20 @@ def _report_csv(rows):
 def _iam_client(users, policies_by_user=None, groups_by_user=None, fanout_error_users=None,
                  report_rows=None, generate_raises_limit_exceeded=False,
                  report_never_ready=False, get_report_raises=None,
-                 allowed_actions_by_arn=None, escalation_error_arns=None):
+                 allowed_actions_by_arn=None, escalation_error_arns=None, tags_by_user=None):
+    # list_user_tags needs an explicit, real {'Tags': [...], 'IsTruncated':
+    # False} response — an unconfigured MagicMock's own .get('IsTruncated')
+    # is always truthy, which would make get_user_tags()'s own pagination
+    # loop spin forever.
     client = MagicMock()
     policies_by_user = policies_by_user or {}
     groups_by_user = groups_by_user or {}
     fanout_error_users = fanout_error_users or set()
     allowed_actions_by_arn = allowed_actions_by_arn or {}
     escalation_error_arns = escalation_error_arns or set()
+    tags_by_user = tags_by_user or {}
+    client.list_user_tags.side_effect = lambda UserName, **kw: {
+        'Tags': tags_by_user.get(UserName, []), 'IsTruncated': False}
 
     def _simulate(PolicySourceArn, ActionNames, ResourceArns):
         if PolicySourceArn in escalation_error_arns:
@@ -132,6 +139,15 @@ class TestGather:
         assert kwargs['resource_name'] == 'alice'
         assert kwargs['raw']['_AttachedPolicies'] == [{'PolicyName': 'AdministratorAccess'}]
         assert kwargs['raw']['_Groups'] == [{'GroupName': 'admins'}]
+
+    def test_user_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        user = {'UserName': 'alice', 'Arn': 'arn:aws:iam::1:user/alice'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _iam_client([user], tags_by_user={'alice': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_a_fanout_failure_still_records_the_user_with_empty_lists(self):
         w = MagicMock()

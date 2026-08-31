@@ -93,6 +93,16 @@ class TestGather:
         assert instance_call.kwargs['scope_id'] == 'vpc-1'
         assert instance_call.kwargs['raw']['_SSLParameter']['ParameterName'] == 'rds.force_ssl'
 
+    def test_instance_tags_are_passed_through_for_suppression(self):
+        # RDS uses TagList, not Tags, across every describe_db_* API.
+        w = MagicMock()
+        instance = {'DBInstanceIdentifier': 'db1', 'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(instances=[instance])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_instance'].kwargs['tags'] == instance['TagList']
+
     def test_adds_one_resource_per_cluster_without_a_scope_id(self):
         w = MagicMock()
         cluster = {'DBClusterIdentifier': 'c1'}
@@ -102,6 +112,15 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['rds_cluster'].kwargs['resource_id'] == 'c1'
         assert 'scope_id' not in calls['rds_cluster'].kwargs
+
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'DBClusterIdentifier': 'c1', 'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(clusters=[cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_cluster'].kwargs['tags'] == cluster['TagList']
 
     def test_a_clusters_failure_does_not_prevent_instances_from_being_gathered(self):
         w = MagicMock()
@@ -147,6 +166,15 @@ class TestGather:
         assert snap_call.kwargs['resource_id'] == 'snap-1'
         assert snap_call.kwargs['resource_name'] == 'snap-1'
         assert snap_call.kwargs['raw'] == snap
+
+    def test_snapshot_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        snap = {'DBSnapshotIdentifier': 'snap-1', 'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(snapshots=[snap])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_snapshot'].kwargs['tags'] == snap['TagList']
 
     def test_a_snapshots_failure_does_not_prevent_instances_or_clusters(self):
         w = MagicMock()

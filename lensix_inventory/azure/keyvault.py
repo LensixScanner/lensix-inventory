@@ -98,6 +98,7 @@ def gather(credential, subscription_id, writer):
             resource_name=vault.name,
             scope_id=rg,
             raw=raw,
+            tags=raw.get('tags'),
         )
 
         try:
@@ -109,6 +110,7 @@ def gather(credential, subscription_id, writer):
                     resource_name=key['name'],
                     scope_id=rg,
                     raw=key,
+                    tags=key.get('tags'),
                 )
         except Exception as e:
             writer.add_error(region=region, source=f'keyvault:keys:{vault.name}', message=e)
@@ -122,6 +124,7 @@ def gather(credential, subscription_id, writer):
                     resource_name=secret['name'],
                     scope_id=rg,
                     raw=secret,
+                    tags=secret.get('tags'),
                 )
         except Exception as e:
             writer.add_error(region=region, source=f'keyvault:secrets:{vault.name}', message=e)

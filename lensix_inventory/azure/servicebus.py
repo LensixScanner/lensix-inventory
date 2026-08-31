@@ -26,11 +26,13 @@ def gather(credential, subscription_id, writer):
         return
 
     for ns in namespaces:
+        raw = ns.as_dict()
         writer.add_resource(
             resource_type='servicebus_namespace',
             region=ns.location or 'global',
             resource_id=ns.id,
             resource_name=ns.name,
             scope_id=_resource_group(ns.id),
-            raw=ns.as_dict(),
+            raw=raw,
+            tags=raw.get('tags'),
         )

@@ -123,6 +123,7 @@ def gather(credential, subscription_id, writer):
             scope_id=_resource_group(vm.id),
             raw=raw,
             secret_scan_hits=hits,
+            tags=raw.get('tags'),
         )
         # NICs referenced by vm.network_profile are NOT fetched here — see
         # module docstring: defender.py already gathers every NIC in the
@@ -132,26 +133,30 @@ def gather(credential, subscription_id, writer):
 
     try:
         for disk in get_disks(credential, subscription_id):
+            disk_raw = disk.as_dict()
             writer.add_resource(
                 resource_type='disk',
                 region=disk.location or 'global',
                 resource_id=disk.id,
                 resource_name=disk.name,
                 scope_id=_resource_group(disk.id),
-                raw=disk.as_dict(),
+                raw=disk_raw,
+                tags=disk_raw.get('tags'),
             )
     except Exception as e:
         writer.add_error(region='global', source='vm:disks', message=e)
 
     try:
         for snap in get_snapshots(credential, subscription_id):
+            snap_raw = snap.as_dict()
             writer.add_resource(
                 resource_type='snapshot',
                 region=snap.location or 'global',
                 resource_id=snap.id,
                 resource_name=snap.name,
                 scope_id=_resource_group(snap.id),
-                raw=snap.as_dict(),
+                raw=snap_raw,
+                tags=snap_raw.get('tags'),
             )
     except Exception as e:
         writer.add_error(region='global', source='vm:snapshots', message=e)
@@ -174,6 +179,7 @@ def gather(credential, subscription_id, writer):
                 scope_id=_resource_group(vmss.id),
                 raw=raw,
                 secret_scan_hits=hits,
+                tags=raw.get('tags'),
             )
     except Exception as e:
         writer.add_error(region='global', source='vm:scale_sets', message=e)

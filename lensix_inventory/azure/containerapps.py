@@ -106,4 +106,5 @@ def gather(credential, subscription_id, writer):
             scope_id=rg,
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=raw.get('tags'),
         )

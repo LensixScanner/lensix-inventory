@@ -53,4 +53,5 @@ def gather(project_id, credentials, writer):
             resource_id=name,
             resource_name=name,
             raw=raw,
+            tags=raw.get('labels'),
         )

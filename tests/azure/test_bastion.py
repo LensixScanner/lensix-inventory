@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='bastion_host', region='eastus', resource_id=host.id,
             resource_name='b1', scope_id='my-rg', raw={'id': host.id, 'name': 'b1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        host = _host()
+        host.as_dict.return_value = {'id': host.id, 'name': 'b1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.bastion_hosts.list_all.return_value = [host]
+        with patch.object(m, 'NetworkManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_bastion_hosts_gathers_nothing(self):
         w = MagicMock()

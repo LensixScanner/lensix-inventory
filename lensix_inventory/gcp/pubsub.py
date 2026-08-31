@@ -45,6 +45,7 @@ def gather(project_id, credentials, writer):
                 resource_id=topic_name,
                 resource_name=topic_name.split('/')[-1],
                 raw=topic,
+                tags=topic.get('labels'),
             )
     except Exception as e:
         writer.add_error(region='global', source='pubsub_topic', message=e)
@@ -58,6 +59,7 @@ def gather(project_id, credentials, writer):
                 resource_id=sub_name,
                 resource_name=sub_name.split('/')[-1],
                 raw=sub,
+                tags=sub.get('labels'),
             )
     except Exception as e:
         writer.add_error(region='global', source='pubsub_subscription', message=e)

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from lensix_inventory.common.output import InventoryWriter, is_permission_error
+from lensix_inventory.common.output import InventoryWriter, is_permission_error, _normalize_tags, parse_tag_suppression
 
 
 def _writer():
@@ -83,6 +83,191 @@ class TestAddResource:
         w.add_resource(resource_type='a', region='', resource_id='1', resource_name='1', raw={})
         assert w.records[0]['region'] == ''
         assert w._regions == set()  # empty region string must not pollute the manifest's region list
+
+
+class TestNormalizeTags:
+    def test_aws_list_of_dicts(self):
+        assert _normalize_tags([{'Key': 'Name', 'Value': 'web-1'}, {'Key': 'Env', 'Value': 'prod'}]) == {
+            'Name': 'web-1', 'Env': 'prod',
+        }
+
+    def test_azure_gcp_flat_dict_passes_through(self):
+        assert _normalize_tags({'Name': 'web-1'}) == {'Name': 'web-1'}
+
+    def test_none_returns_empty(self):
+        assert _normalize_tags(None) == {}
+
+    def test_empty_list_returns_empty(self):
+        assert _normalize_tags([]) == {}
+
+    def test_aws_entries_missing_a_key_are_skipped(self):
+        assert _normalize_tags([{'Value': 'orphan'}, {'Key': 'Env', 'Value': 'prod'}]) == {'Env': 'prod'}
+
+    def test_lowercase_key_value_shape_used_by_ecs_eks_glue_msk_and_others(self):
+        assert _normalize_tags([{'key': 'Name', 'value': 'web-1'}, {'key': 'Env', 'value': 'prod'}]) == {
+            'Name': 'web-1', 'Env': 'prod',
+        }
+
+    def test_lowercase_entries_missing_a_key_are_skipped(self):
+        assert _normalize_tags([{'value': 'orphan'}, {'key': 'Env', 'value': 'prod'}]) == {'Env': 'prod'}
+
+    def test_mixed_case_lists_are_not_expected_but_do_not_crash(self):
+        # Real AWS responses are consistently one case or the other per
+        # service — this just confirms a per-entry lookup, not a
+        # whole-list case sniff, so nothing stranger than "half the tags
+        # get skipped" could happen even on an unrealistic mixed input.
+        assert _normalize_tags([{'Key': 'A', 'Value': '1'}, {'key': 'B', 'value': '2'}]) == {'A': '1', 'B': '2'}
+
+    def test_tagkey_tagvalue_shape_used_by_kms(self):
+        assert _normalize_tags([{'TagKey': 'Name', 'TagValue': 'web-1'}, {'TagKey': 'Env', 'TagValue': 'prod'}]) == {
+            'Name': 'web-1', 'Env': 'prod',
+        }
+
+    def test_tagkey_entries_missing_a_key_are_skipped(self):
+        assert _normalize_tags([{'TagValue': 'orphan'}, {'TagKey': 'Env', 'TagValue': 'prod'}]) == {'Env': 'prod'}
+
+
+class TestParseTagSuppression:
+    def test_full_suppress_true(self):
+        full, checks = parse_tag_suppression({'lensix-suppress': 'true'})
+        assert full is True
+        assert checks == frozenset()
+
+    def test_full_suppress_is_case_insensitive(self):
+        full, _ = parse_tag_suppression({'lensix-suppress': 'True'})
+        assert full is True
+
+    def test_full_suppress_requires_exactly_true(self):
+        full, _ = parse_tag_suppression({'lensix-suppress': 'yes'})
+        assert full is False
+
+    def test_no_suppression_tags_at_all(self):
+        full, checks = parse_tag_suppression({'Name': 'web-1'})
+        assert full is False
+        assert checks == frozenset()
+
+    def test_single_check_id(self):
+        _, checks = parse_tag_suppression({'lensix-suppress-checks': 'ec2_deletion_protection'})
+        assert checks == frozenset({'ec2_deletion_protection'})
+
+    def test_multiple_check_ids_hyphen_separated(self):
+        _, checks = parse_tag_suppression({'lensix-suppress-checks': 'ec2_deletion_protection-ec2_public_ip'})
+        assert checks == frozenset({'ec2_deletion_protection', 'ec2_public_ip'})
+
+    def test_aws_list_of_dicts_shape(self):
+        full, checks = parse_tag_suppression([
+            {'Key': 'lensix-suppress-checks', 'Value': 'ec2_public_ip'},
+        ])
+        assert full is False
+        assert checks == frozenset({'ec2_public_ip'})
+
+    def test_both_tags_present(self):
+        full, checks = parse_tag_suppression({
+            'lensix-suppress': 'true', 'lensix-suppress-checks': 'ec2_public_ip',
+        })
+        assert full is True
+        assert checks == frozenset({'ec2_public_ip'})
+
+    def test_none_tags(self):
+        full, checks = parse_tag_suppression(None)
+        assert full is False
+        assert checks == frozenset()
+
+    def test_empty_checks_value_yields_no_checks(self):
+        _, checks = parse_tag_suppression({'lensix-suppress-checks': ''})
+        assert checks == frozenset()
+
+    def test_stray_hyphens_do_not_produce_empty_check_ids(self):
+        _, checks = parse_tag_suppression({'lensix-suppress-checks': '-ec2_public_ip--'})
+        assert checks == frozenset({'ec2_public_ip'})
+
+
+class TestAddResourceTagSuppression:
+    def test_fully_suppressed_resource_is_not_recorded(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'}, tags={'lensix-suppress': 'true'})
+        assert w.records == []
+
+    def test_fully_suppressed_resource_does_not_count_toward_resource_counts(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={}, tags={'lensix-suppress': 'true'})
+        assert w.resource_counts == {}
+
+    def test_fully_suppressed_resource_is_tracked_in_tag_suppressions(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={}, tags={'lensix-suppress': 'true'})
+        assert w.tag_suppressions == [{
+            'resource_type': 'ec2_instance', 'resource_id': 'i-1', 'region': 'us-east-1',
+            'full_suppress': True, 'check_ids': [],
+        }]
+
+    def test_per_check_suppressed_resource_is_still_recorded(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'},
+                        tags={'lensix-suppress-checks': 'ec2_deletion_protection'})
+        assert len(w.records) == 1
+        assert w.records[0]['resource_id'] == 'i-1'
+
+    def test_per_check_suppressed_resource_gets_suppressed_check_ids_in_raw(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'},
+                        tags={'lensix-suppress-checks': 'ec2_deletion_protection-ec2_public_ip'})
+        # A plain sorted list, not a frozenset — this raw dict is
+        # JSON-serialized verbatim for the upload path, and json.dumps
+        # has no native frozenset support.
+        assert w.records[0]['raw']['_SuppressedCheckIds'] == ['ec2_deletion_protection', 'ec2_public_ip']
+
+    def test_per_check_suppression_does_not_mutate_the_callers_own_raw_dict(self):
+        original_raw = {'InstanceId': 'i-1'}
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw=original_raw, tags={'lensix-suppress-checks': 'ec2_public_ip'})
+        assert '_SuppressedCheckIds' not in original_raw
+
+    def test_per_check_suppressed_resource_is_tracked_in_tag_suppressions(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={}, tags={'lensix-suppress-checks': 'ec2_public_ip'})
+        assert w.tag_suppressions == [{
+            'resource_type': 'ec2_instance', 'resource_id': 'i-1', 'region': 'us-east-1',
+            'full_suppress': False, 'check_ids': ['ec2_public_ip'],
+        }]
+
+    def test_a_resource_with_no_suppression_tags_is_recorded_normally_and_untracked(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'}, tags={'Name': 'web-1'})
+        assert len(w.records) == 1
+        assert '_SuppressedCheckIds' not in w.records[0]['raw']
+        assert w.tag_suppressions == []
+
+    def test_no_tags_argument_at_all_behaves_exactly_as_before(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'})
+        assert len(w.records) == 1
+        assert w.tag_suppressions == []
+
+    def test_aws_shaped_tags_work_end_to_end(self):
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'},
+                        tags=[{'Key': 'lensix-suppress', 'Value': 'true'}])
+        assert w.records == []
+        assert w.tag_suppressions[0]['full_suppress'] is True
+
+    def test_tag_suppressions_property_returns_a_copy(self):
+        w = _writer()
+        w.add_resource(resource_type='a', region='r', resource_id='1', resource_name='1',
+                        raw={}, tags={'lensix-suppress': 'true'})
+        snapshot = w.tag_suppressions
+        snapshot.append({'fake': True})
+        assert len(w.tag_suppressions) == 1
 
 
 class TestAddError:
@@ -190,6 +375,25 @@ class TestWrite:
         assert manifest['total_resources'] == 0
         assert manifest['regions'] == []
         assert self._read_lines(str(path)) == [manifest]
+
+    def test_suppressed_check_ids_survive_the_json_round_trip_as_a_list(self, tmp_path):
+        # Regression test: raw['_SuppressedCheckIds'] used to be injected
+        # as a frozenset, which json.dumps has no native support for —
+        # _json_default's str(value) fallback silently mangled it into a
+        # single unusable string like "frozenset({'ec2_deletion_protection'})"
+        # instead of a real JSON array, breaking every downstream consumer
+        # of a customer's own uploaded inventory file (derive_tag_
+        # suppressions(), each check-evaluation loop's `in` check).
+        w = _writer()
+        w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                        resource_name='i-1', raw={'InstanceId': 'i-1'},
+                        tags={'lensix-suppress-checks': 'ec2_deletion_protection-ec2_public_ip'})
+        path = tmp_path / 'out.ndjson.gz'
+        w.write(str(path))
+
+        lines = self._read_lines(str(path))
+        resource_line = next(l for l in lines if l['kind'] == 'resource')
+        assert resource_line['raw']['_SuppressedCheckIds'] == ['ec2_deletion_protection', 'ec2_public_ip']
 
     def test_datetime_values_in_raw_are_serialized_as_isoformat(self, tmp_path):
         w = _writer()

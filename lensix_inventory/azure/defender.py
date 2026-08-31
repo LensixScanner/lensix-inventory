@@ -48,6 +48,12 @@ def gather(credential, subscription_id, writer):
         pricings = []
 
     for pricing in pricings:
+        # No tags= here: Pricing (Microsoft Defender for Cloud's own
+        # subscription-wide plan tier) has no `tags` field on its own SDK
+        # model at all (confirmed — the SDK discards it with a warning if
+        # passed), a control-plane object in the same class as
+        # authorization's role_definition/securitycenter's own
+        # security_contact/security_setting.
         writer.add_resource(
             resource_type='defender_pricing',
             region='global',
@@ -63,11 +69,13 @@ def gather(credential, subscription_id, writer):
         nics = []
 
     for nic in nics:
+        nic_raw = _as_dict(nic)
         writer.add_resource(
             resource_type='network_interface',
             region=nic.location or 'global',
             resource_id=nic.id,
             resource_name=nic.name,
             scope_id=_resource_group(nic.id),
-            raw=_as_dict(nic),
+            raw=nic_raw,
+            tags=nic_raw.get('tags'),
         )

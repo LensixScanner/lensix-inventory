@@ -28,6 +28,21 @@ def get_notifications(account_id, budget_name):
     return resp.get('Notifications', [])
 
 
+def get_budget_tags(account_id, budget_name):
+    """describe_budgets doesn't include tags or an ARN — Budgets' own
+    ListTagsForResource, keyed by a hand-built ARN (Budgets ARNs are
+    predictable: arn:aws:budgets::<account_id>:budget/<name> — no extra
+    lookup call needed to get one, unlike athena.py/cicd.py's own
+    ARN-needs-account_id gaps; this module's gather(writer, account_id)
+    signature already carries account_id). Returns [] on failure."""
+    budgets_client = boto3.client('budgets', region_name='us-east-1')
+    arn = f'arn:aws:budgets::{account_id}:budget/{budget_name}'
+    try:
+        return budgets_client.list_tags_for_resource(ResourceARN=arn).get('ResourceTags', [])
+    except Exception:
+        return []
+
+
 def gather(writer, account_id):
     for budget in get_budgets(account_id):
         name = budget['BudgetName']
@@ -50,4 +65,5 @@ def gather(writer, account_id):
             resource_id=name,
             resource_name=name,
             raw=raw,
+            tags=get_budget_tags(account_id, name),
         )

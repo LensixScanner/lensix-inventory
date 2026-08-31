@@ -25,8 +25,16 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='elastic_ip', region='us-east-1', resource_id='eipalloc-1',
-            resource_name='1.2.3.4', raw=eip,
+            resource_name='1.2.3.4', raw=eip, tags=None,
         )
+
+    def test_eip_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        eip = {'PublicIp': '1.2.3.4', 'AllocationId': 'eipalloc-1', 'Tags': tags}
+        with patch.object(m.boto3, 'client', return_value=_ec2([eip])):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_unassociated_eip_is_still_gathered(self):
         # "unattached" is server-side evaluation, not a gather-time filter.

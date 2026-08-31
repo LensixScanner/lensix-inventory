@@ -63,4 +63,5 @@ def gather(credential, subscription_id, writer):
             resource_name=profile.name,
             scope_id=rg,
             raw=raw,
+            tags=raw.get('tags'),
         )

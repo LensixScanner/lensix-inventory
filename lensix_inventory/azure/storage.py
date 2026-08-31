@@ -97,6 +97,7 @@ def gather(credential, subscription_id, writer):
             resource_name=account.name,
             scope_id=rg,
             raw=raw,
+            tags=raw.get('tags'),
         )
 
         try:
@@ -106,6 +107,10 @@ def gather(credential, subscription_id, writer):
             continue
 
         for container in containers:
+            # No tags= here: BlobContainer (a sub-resource of the storage
+            # account, not the account itself) has no `tags` field on its
+            # own SDK model — confirmed absent, same architectural N/A as
+            # authorization.py's role_definition.
             writer.add_resource(
                 resource_type='blob_container',
                 region=region,

@@ -7,8 +7,21 @@ import lensix_inventory.aws.kinesis as m
 
 def _client(stream_names=None, summary_by_name=None, summary_error_names=None,
             streams_raise=False, firehose_names=None, firehose_detail_by_name=None,
-            firehose_error_names=None, firehose_raise=False, incoming_records=None):
+            firehose_error_names=None, firehose_raise=False, incoming_records=None,
+            stream_tags_by_name=None, firehose_tags_by_name=None):
+    # list_tags_for_stream/list_tags_for_delivery_stream both need an
+    # explicit, real {'Tags': [...], 'HasMoreTags': False} response — an
+    # unconfigured MagicMock's own .get('HasMoreTags') is always truthy,
+    # which would make get_stream_tags()/get_firehose_tags()'s own
+    # pagination loop spin forever (same trap noted in test_dynamodb.py's
+    # own _client()).
     client = MagicMock()
+    stream_tags_by_name = stream_tags_by_name or {}
+    firehose_tags_by_name = firehose_tags_by_name or {}
+    client.list_tags_for_stream.side_effect = lambda StreamName, **kw: {
+        'Tags': stream_tags_by_name.get(StreamName, []), 'HasMoreTags': False}
+    client.list_tags_for_delivery_stream.side_effect = lambda DeliveryStreamName, **kw: {
+        'Tags': firehose_tags_by_name.get(DeliveryStreamName, []), 'HasMoreTags': False}
     if incoming_records is not None:
         client.get_metric_statistics.return_value = {'Datapoints': incoming_records}
     stream_names = stream_names or []
@@ -87,6 +100,17 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['kinesis_stream'].kwargs['raw']['_IncomingRecordsDatapoints'] is None
 
+    def test_stream_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        summary = {'StreamStatus': 'ACTIVE'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _client(stream_names=['s1'], summary_by_name={'s1': summary}, incoming_records=[],
+                          stream_tags_by_name={'s1': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['kinesis_stream'].kwargs['tags'] == tags
+
     def test_the_original_summary_dict_is_not_mutated(self):
         w = MagicMock()
         summary = {'StreamStatus': 'ACTIVE'}
@@ -122,6 +146,17 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['kinesis_firehose_stream'].kwargs['resource_id'] == 'fh1'
 
+    def test_firehose_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        detail = {'DeliveryStreamStatus': 'ACTIVE'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _client(firehose_names=['fh1'], firehose_detail_by_name={'fh1': detail},
+                          firehose_tags_by_name={'fh1': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['kinesis_firehose_stream'].kwargs['tags'] == tags
+
     def test_a_firehose_detail_failure_does_not_abort_the_others(self):
         w = MagicMock()
         client = _client(firehose_names=['bad', 'good'], firehose_detail_by_name={'good': {}}, firehose_error_names={'bad'})
@@ -139,6 +174,42 @@ class TestGather:
         assert any(c.kwargs['source'] == 'kinesis (firehose streams)' for c in w.add_error.call_args_list)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert 'kinesis_stream' in calls
+
+
+class TestGetStreamTags:
+    def test_paginates_via_exclusive_start_tag_key(self):
+        client = MagicMock()
+        client.list_tags_for_stream.side_effect = [
+            {'Tags': [{'Key': 'a', 'Value': '1'}], 'HasMoreTags': True},
+            {'Tags': [{'Key': 'b', 'Value': '2'}], 'HasMoreTags': False},
+        ]
+        with patch.object(m.boto3, 'client', return_value=client):
+            tags = m.get_stream_tags('us-east-1', 's1')
+        assert tags == [{'Key': 'a', 'Value': '1'}, {'Key': 'b', 'Value': '2'}]
+
+    def test_a_failure_returns_an_empty_list(self):
+        client = MagicMock()
+        client.list_tags_for_stream.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=client):
+            assert m.get_stream_tags('us-east-1', 's1') == []
+
+
+class TestGetFirehoseTags:
+    def test_paginates_via_exclusive_start_tag_key(self):
+        client = MagicMock()
+        client.list_tags_for_delivery_stream.side_effect = [
+            {'Tags': [{'Key': 'a', 'Value': '1'}], 'HasMoreTags': True},
+            {'Tags': [{'Key': 'b', 'Value': '2'}], 'HasMoreTags': False},
+        ]
+        with patch.object(m.boto3, 'client', return_value=client):
+            tags = m.get_firehose_tags('us-east-1', 'fh1')
+        assert tags == [{'Key': 'a', 'Value': '1'}, {'Key': 'b', 'Value': '2'}]
+
+    def test_a_failure_returns_an_empty_list(self):
+        client = MagicMock()
+        client.list_tags_for_delivery_stream.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=client):
+            assert m.get_firehose_tags('us-east-1', 'fh1') == []
 
 
 class TestGetIncomingRecords7d:

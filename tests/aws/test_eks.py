@@ -29,8 +29,16 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='eks_cluster', region='us-east-1',
             resource_id='arn:aws:eks:us-east-1:1:cluster/c1', resource_name='c1',
-            scope_id='vpc-1', raw=cluster,
+            scope_id='vpc-1', raw=cluster, tags=None,
         )
+
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'arn': 'arn:1', 'resourcesVpcConfig': {}, 'tags': {'lensix-suppress': 'true'}}
+        client = _eks_client(['c1'], detail_by_name={'c1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_the_cluster_name_when_arn_missing(self):
         w = MagicMock()

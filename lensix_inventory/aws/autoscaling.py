@@ -1,5 +1,10 @@
 """Auto Scaling group gathering — one raw record per group.
 
+`get_asgs` (describe_auto_scaling_groups) already returns its own `Tags`
+inline (uppercase {'Key','Value',...} shape) — passed straight through to
+add_resource() for tag-based suppression, no separate tag-fetch call
+needed.
+
 `get_asgs` (describe_auto_scaling_groups) already returns everything needed
 for single-AZ, missing-ELB-health-check, empty-group, and
 suspended-process evaluation in one call — no extra fan-out.
@@ -134,4 +139,5 @@ def gather(region, writer):
             resource_id=asg['AutoScalingGroupARN'],
             resource_name=asg['AutoScalingGroupName'],
             raw=asg,
+            tags=asg.get('Tags'),
         )

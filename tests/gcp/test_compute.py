@@ -77,16 +77,17 @@ class TestRedactMetadata:
 
 
 class TestGatherMetadataIntegration:
-    def _compute(self, instances=None, project_metadata_items=None):
+    def _compute(self, instances=None, project_metadata_items=None, images=None, snapshots=None, migs=None):
         compute = MagicMock()
         compute.instances.return_value.aggregatedList.return_value = _paged(
             aggregated={'zones/z1': {'instances': instances or []}})
         compute.instances.return_value.aggregatedList_next.return_value = None
-        compute.images.return_value.list.return_value = _paged(items=[])
+        compute.images.return_value.list.return_value = _paged(items=images or [])
         compute.images.return_value.list_next.return_value = None
-        compute.snapshots.return_value.list.return_value = _paged(items=[])
+        compute.snapshots.return_value.list.return_value = _paged(items=snapshots or [])
         compute.snapshots.return_value.list_next.return_value = None
-        compute.instanceGroupManagers.return_value.aggregatedList.return_value = _paged(aggregated={})
+        compute.instanceGroupManagers.return_value.aggregatedList.return_value = _paged(
+            aggregated={'zones/z1': {'instanceGroupManagers': migs or []}} if migs else {})
         compute.instanceGroupManagers.return_value.aggregatedList_next.return_value = None
         compute.autoscalers.return_value.aggregatedList.return_value = _paged(aggregated={})
         compute.autoscalers.return_value.aggregatedList_next.return_value = None
@@ -125,6 +126,62 @@ class TestGatherMetadataIntegration:
         raw = calls['compute_project_metadata'].kwargs['raw']
         assert raw['itemValues'] == {'ssh-keys': 'alice:ssh-rsa AAAA...'}
         assert set(raw['itemKeys']) == {'ssh-keys', 'other-key'}
+
+
+class TestGatherTags:
+    """Instance/Image/Snapshot all support GCP labels (confirmed against
+    the real Compute Engine v1 discovery document schema — see
+    docs/tag-suppressions.md in lensix-scanner-light for the vpc.py
+    mistake this check now guards against); InstanceGroupManager and the
+    synthetic compute_project_metadata do not."""
+
+    def _compute(self, **kwargs):
+        return TestGatherMetadataIntegration()._compute(**kwargs)
+
+    def test_instance_tags_are_passed_through_from_labels(self):
+        w = MagicMock()
+        instance = {'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/z1',
+                    'labels': {'lensix-suppress': 'true'}}
+        compute = self._compute(instances=[instance])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['compute_instance'].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_image_tags_are_passed_through_from_labels(self):
+        w = MagicMock()
+        image = {'name': 'img-1', 'labels': {'lensix-suppress-checks': 'compute_publicimage'}}
+        compute = self._compute(images=[image])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['compute_image'].kwargs['tags'] == {'lensix-suppress-checks': 'compute_publicimage'}
+
+    def test_snapshot_tags_are_passed_through_from_labels(self):
+        w = MagicMock()
+        snap = {'name': 'snap-1', 'labels': {'env': 'prod'}}
+        compute = self._compute(snapshots=[snap])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['compute_snapshot'].kwargs['tags'] == {'env': 'prod'}
+
+    def test_instance_group_manager_has_no_tags_kwarg(self):
+        w = MagicMock()
+        mig = {'name': 'mig-1', 'selfLink': 'https://.../instanceGroupManagers/mig-1'}
+        compute = self._compute(migs=[mig])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert 'tags' not in calls['instance_group_manager'].kwargs
+
+    def test_project_metadata_has_no_tags_kwarg(self):
+        w = MagicMock()
+        compute = self._compute()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert 'tags' not in calls['compute_project_metadata'].kwargs
 
 
 class TestMigInstanceTemplateName:

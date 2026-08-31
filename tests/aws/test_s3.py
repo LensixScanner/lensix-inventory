@@ -24,7 +24,8 @@ def _s3_client(buckets=None, region_by_bucket=None, sub_api_overrides=None):
     client.get_bucket_location.side_effect = _region
 
     sub_apis = ['get_bucket_logging', 'get_public_access_block', 'get_bucket_policy',
-                'get_bucket_lifecycle_configuration', 'get_bucket_versioning', 'get_bucket_encryption']
+                'get_bucket_lifecycle_configuration', 'get_bucket_versioning', 'get_bucket_encryption',
+                'get_bucket_tagging']
     for api in sub_apis:
         def _make(api_name):
             def _call(Bucket):
@@ -114,6 +115,26 @@ class TestGetBucketMetadata:
         assert meta['_PolicyFetchError'] is None
 
 
+class TestGetBucketTags:
+    def test_returns_the_tag_set_when_present(self):
+        client = _s3_client(sub_api_overrides={'my-bucket': {
+            'get_bucket_tagging': {'TagSet': [{'Key': 'env', 'Value': 'prod'}]},
+        }})
+        assert m.get_bucket_tags(client, 'my-bucket') == [{'Key': 'env', 'Value': 'prod'}]
+
+    def test_no_tags_configured_returns_none(self):
+        client = _s3_client(sub_api_overrides={'my-bucket': {
+            'get_bucket_tagging': _client_error('NoSuchTagSet'),
+        }})
+        assert m.get_bucket_tags(client, 'my-bucket') is None
+
+    def test_an_unrelated_failure_also_returns_none_rather_than_raising(self):
+        client = _s3_client(sub_api_overrides={'my-bucket': {
+            'get_bucket_tagging': RuntimeError('boom'),
+        }})
+        assert m.get_bucket_tags(client, 'my-bucket') is None
+
+
 class TestGather:
     def test_adds_one_resource_per_bucket_with_metadata_merged_in(self):
         w = MagicMock()
@@ -128,6 +149,17 @@ class TestGather:
         assert kwargs['resource_id'] == 'my-bucket'
         assert kwargs['raw']['Name'] == 'my-bucket'
         assert kwargs['raw']['AccountId'] == '123456789012'
+
+    def test_passes_the_bucket_tag_set_through_to_add_resource(self):
+        w = MagicMock()
+        bucket = {'Name': 'my-bucket'}
+        client = _s3_client(buckets=[bucket], region_by_bucket={'my-bucket': 'us-east-1'},
+                             sub_api_overrides={'my-bucket': {
+                                 'get_bucket_tagging': {'TagSet': [{'Key': 'lensix-suppress', 'Value': 'true'}]},
+                             }})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w, '123456789012')
+        assert w.add_resource.call_args.kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
 
     def test_sub_api_failures_are_swallowed_internally_not_surfaced_as_bucket_errors(self):
         # Every sub-API call goes through _try(), which never re-raises —

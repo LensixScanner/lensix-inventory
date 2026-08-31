@@ -29,4 +29,7 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=name,
             raw=cluster,
+            # Neptune's describe_db_clusters shares RDS's own response
+            # shape, TagList included.
+            tags=cluster.get('TagList'),
         )

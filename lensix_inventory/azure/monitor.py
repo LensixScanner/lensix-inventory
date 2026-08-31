@@ -37,10 +37,12 @@ def gather(credential, subscription_id, writer):
         return
 
     for profile in profiles:
+        raw = profile.as_dict()
         writer.add_resource(
             resource_type='monitor_log_profile',
             region='global',
             resource_id=profile.id,
             resource_name=profile.name,
-            raw=profile.as_dict(),
+            raw=raw,
+            tags=raw.get('tags'),
         )

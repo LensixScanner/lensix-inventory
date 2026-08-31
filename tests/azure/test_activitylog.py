@@ -24,7 +24,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='activity_log_alert', region='global', resource_id=alert.id,
             resource_name='a1', scope_id='my-rg', raw={'id': alert.id, 'name': 'a1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        alert = _alert()
+        alert.as_dict.return_value = {'id': alert.id, 'name': 'a1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.activity_log_alerts.list_by_subscription_id.return_value = [alert]
+        with patch.object(m, 'MonitorManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_alerts_gathers_nothing(self):
         w = MagicMock()

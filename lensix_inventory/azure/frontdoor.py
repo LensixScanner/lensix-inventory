@@ -17,11 +17,13 @@ def get_front_doors(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for fd in get_front_doors(credential, subscription_id):
+        raw = _as_dict(fd)
         writer.add_resource(
             resource_type='frontdoor_profile',
             region=getattr(fd, 'location', None) or 'global',
             resource_id=fd.id,
             resource_name=fd.name,
             scope_id=_resource_group(fd.id),
-            raw=_as_dict(fd),
+            raw=raw,
+            tags=raw.get('tags'),
         )

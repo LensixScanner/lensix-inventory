@@ -24,11 +24,13 @@ def gather(credential, subscription_id, writer):
         return
 
     for cache in caches:
+        raw = cache.as_dict()
         writer.add_resource(
             resource_type='redis_cache',
             region=cache.location or 'global',
             resource_id=cache.id,
             resource_name=cache.name,
             scope_id=_resource_group(cache.id),
-            raw=cache.as_dict(),
+            raw=raw,
+            tags=raw.get('tags'),
         )

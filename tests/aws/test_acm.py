@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.acm as m
 
 
-def _acm_client(arns, detail_by_arn=None, detail_error_arns=None):
+def _acm_client(arns, detail_by_arn=None, detail_error_arns=None, tags_by_arn=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [
         {'CertificateSummaryList': [{'CertificateArn': a} for a in arns]}
@@ -18,6 +18,8 @@ def _acm_client(arns, detail_by_arn=None, detail_error_arns=None):
             raise RuntimeError('boom')
         return {'Certificate': detail_by_arn[CertificateArn]}
     client.describe_certificate.side_effect = _describe
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags_for_certificate.side_effect = lambda CertificateArn: {'Tags': tags_by_arn.get(CertificateArn, [])}
     return client
 
 
@@ -31,7 +33,17 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='acm_certificate', region='us-east-1',
             resource_id='arn:cert1', resource_name='example.com', raw=cert,
+            tags=[],
         )
+
+    def test_certificate_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cert = {'DomainName': 'example.com'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _acm_client(['arn:cert1'], detail_by_arn={'arn:cert1': cert}, tags_by_arn={'arn:cert1': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_falls_back_to_the_arn_when_domain_name_missing(self):
         w = MagicMock()

@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='apimgmt_service', region='eastus', resource_id=service.id,
             resource_name='svc1', scope_id='my-rg', raw={'id': service.id, 'name': 'svc1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        service = _service()
+        service.as_dict.return_value = {'id': service.id, 'name': 'svc1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.api_management_service.list.return_value = [service]
+        with patch.object(m, 'ApiManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_services_gathers_nothing(self):
         w = MagicMock()

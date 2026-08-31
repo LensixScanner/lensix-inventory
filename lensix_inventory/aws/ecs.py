@@ -36,7 +36,12 @@ def describe_clusters(region, arns):
     clusters = []
     for i in range(0, len(arns), 100):
         batch = arns[i:i + 100]
-        resp = ecs.describe_clusters(clusters=batch, include=['SETTINGS'])
+        # 'TAGS' alongside the existing 'SETTINGS' — ECS only returns a
+        # cluster's tags when explicitly asked for via `include`, unlike
+        # EC2-family describe calls which always include Tags. Its own
+        # tag list uses lowercase {'key','value'} dicts (see
+        # _normalize_tags in lensix_inventory.common.output).
+        resp = ecs.describe_clusters(clusters=batch, include=['SETTINGS', 'TAGS'])
         clusters.extend(resp['clusters'])
     return clusters
 
@@ -50,8 +55,12 @@ def get_task_definition_families(region):
 
 
 def describe_task_definition(region, family):
+    """Returns (task_definition_dict, tags_list) — tags come back as a
+    sibling of 'taskDefinition' in the response, not inside it, and only
+    when explicitly requested via `include`."""
     ecs = boto3.client('ecs', region_name=region)
-    return ecs.describe_task_definition(taskDefinition=family)['taskDefinition']
+    resp = ecs.describe_task_definition(taskDefinition=family, include=['TAGS'])
+    return resp['taskDefinition'], resp.get('tags', [])
 
 
 def _redact_task_def(task_def):
@@ -91,6 +100,7 @@ def gather(region, writer):
             writer.add_resource(
                 resource_type='ecs_cluster', region=region, resource_id=cluster_arn,
                 resource_name=cluster_arn.split('/')[-1], raw=cluster,
+                tags=cluster.get('tags'),
             )
 
     try:
@@ -101,7 +111,7 @@ def gather(region, writer):
 
     for family in families:
         try:
-            task_def = describe_task_definition(region, family)
+            task_def, tags = describe_task_definition(region, family)
         except Exception as e:
             writer.add_error(region=region, source=f'ecs_task_definition:{family}', message=e)
             continue
@@ -115,4 +125,5 @@ def gather(region, writer):
             resource_name=f'{family}:{revision}',
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=tags,
         )

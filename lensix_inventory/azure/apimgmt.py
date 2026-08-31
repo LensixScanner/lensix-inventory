@@ -16,11 +16,13 @@ def get_services(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for service in get_services(credential, subscription_id):
+        raw = _as_dict(service)
         writer.add_resource(
             resource_type='apimgmt_service',
             region=service.location or 'global',
             resource_id=service.id,
             resource_name=service.name,
             scope_id=_resource_group(service.id),
-            raw=_as_dict(service),
+            raw=raw,
+            tags=raw.get('tags'),
         )

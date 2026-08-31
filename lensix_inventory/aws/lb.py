@@ -51,6 +51,20 @@ def get_classic_instance_health(region, name):
         return []
 
 
+def get_classic_lb_tags(region, name):
+    """Classic ELB tags aren't in describe_load_balancers' response — its
+    own separate describe_tags call, one LB per call (matching this
+    module's existing one-call-per-resource convention for attributes/
+    instance health, rather than describe_tags' own up-to-20-per-call
+    batching). Returns [] on failure."""
+    elb = boto3.client('elb', region_name=region)
+    try:
+        descs = elb.describe_tags(LoadBalancerNames=[name])['TagDescriptions']
+        return descs[0]['Tags'] if descs else []
+    except Exception:
+        return []
+
+
 def get_modern_lbs(region):
     elbv2 = boto3.client('elbv2', region_name=region)
     lbs = []
@@ -112,6 +126,19 @@ def get_target_health(region, tg_arn):
         return []
 
 
+def get_elbv2_tags(region, arn):
+    """Covers both modern load balancers and target groups — ELBv2's own
+    describe_tags takes ResourceArns for either type. Not in
+    describe_load_balancers'/describe_target_groups' own response.
+    Returns [] on failure."""
+    elbv2 = boto3.client('elbv2', region_name=region)
+    try:
+        descs = elbv2.describe_tags(ResourceArns=[arn])['TagDescriptions']
+        return descs[0]['Tags'] if descs else []
+    except Exception:
+        return []
+
+
 def get_web_acl(region, resource_arn):
     """Best-effort — no WAF web ACL attached is the expected common case,
     not an error (a WAFNonexistentItemException means exactly that)."""
@@ -145,6 +172,7 @@ def gather(region, writer):
             resource_name=name,
             scope_id=lb.get('VPCId'),
             raw=raw,
+            tags=get_classic_lb_tags(region, name),
         )
 
     try:
@@ -179,6 +207,7 @@ def gather(region, writer):
             resource_name=name,
             scope_id=lb.get('VpcId'),
             raw=raw,
+            tags=get_elbv2_tags(region, arn),
         )
 
     try:
@@ -197,4 +226,5 @@ def gather(region, writer):
             resource_id=tg_arn,
             resource_name=tg.get('TargetGroupName', tg_arn),
             raw=raw,
+            tags=get_elbv2_tags(region, tg_arn),
         )

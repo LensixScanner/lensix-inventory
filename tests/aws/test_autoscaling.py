@@ -39,7 +39,16 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='autoscaling_group', region='us-east-1',
             resource_id='arn:aws:autoscaling:us-east-1:1:asg:1', resource_name='web-asg', raw=asg,
+            tags=None,
         )
+
+    def test_group_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg', 'Tags': tags}
+        with patch.object(m.boto3, 'client', return_value=_asg_client([asg])):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_no_groups_gathers_nothing(self):
         w = MagicMock()

@@ -5,6 +5,10 @@ Two pure fetchers: `list_certificates` (all statuses) and
 evaluation is intentionally not included — Lensix recomputes those
 server-side from the full `Certificate` dict (Status, NotAfter,
 DomainValidationOptions, ...) uploaded here.
+
+Tags need their own list_tags_for_certificate call (not in
+describe_certificate's own response) — passed through for tag-based
+suppression.
 """
 
 import boto3
@@ -27,6 +31,16 @@ def get_certificate(region, arn):
     return acm.describe_certificate(CertificateArn=arn).get('Certificate', {})
 
 
+def get_certificate_tags(region, arn):
+    """describe_certificate doesn't include tags — ACM's own (unpaginated)
+    list_tags_for_certificate call. Returns [] on failure."""
+    acm = boto3.client('acm', region_name=region, config=_BOTO_CFG)
+    try:
+        return acm.list_tags_for_certificate(CertificateArn=arn).get('Tags', [])
+    except Exception:
+        return []
+
+
 def gather(region, writer):
     for arn in get_certificate_arns(region):
         try:
@@ -41,4 +55,5 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=domain,
             raw=cert,
+            tags=get_certificate_tags(region, arn),
         )

@@ -45,8 +45,17 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='msk_cluster', region='us-east-1',
-            resource_id='arn:c1', resource_name='my-cluster', raw=detail,
+            resource_id='arn:c1', resource_name='my-cluster', raw=detail, tags=None,
         )
+
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        detail = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster', 'Tags': {'lensix-suppress': 'true'}}
+        client = _msk_client([{'ClusterInfoList': [summary]}], detail_by_arn={'arn:c1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_a_describe_failure_falls_back_to_the_summary_as_raw_rather_than_skipping(self):
         w = MagicMock()
@@ -58,7 +67,7 @@ class TestGather:
         assert w.add_error.call_args.kwargs['source'] == 'msk_cluster:arn:c1'
         w.add_resource.assert_called_once_with(
             resource_type='msk_cluster', region='us-east-1',
-            resource_id='arn:c1', resource_name='my-cluster', raw=summary,
+            resource_id='arn:c1', resource_name='my-cluster', raw=summary, tags=None,
         )
 
     def test_no_clusters_gathers_nothing(self):

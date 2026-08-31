@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.cost as m
 
 
-def _budgets_client(budgets, notifications_by_name=None, notification_error_names=None):
+def _budgets_client(budgets, notifications_by_name=None, notification_error_names=None, tags_by_name=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'Budgets': budgets}]
     notifications_by_name = notifications_by_name or {}
@@ -16,6 +16,8 @@ def _budgets_client(budgets, notifications_by_name=None, notification_error_name
             raise RuntimeError('boom')
         return {'Notifications': notifications_by_name.get(BudgetName, [])}
     client.describe_notifications_for_budget.side_effect = _get_notifications
+    tags_by_name = tags_by_name or {}
+    client.list_tags_for_resource.side_effect = lambda ResourceARN: {'ResourceTags': tags_by_name.get(ResourceARN.rsplit('/', 1)[-1], [])}
     return client
 
 
@@ -53,6 +55,16 @@ class TestGather:
         with patch.object(m.boto3, 'client', return_value=client):
             m.gather(w, '123456789012')
         assert '_Notifications' not in budget
+
+    def test_budget_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        budget = {'BudgetName': 'monthly'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _budgets_client([budget], tags_by_name={'monthly': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w, '123456789012')
+        assert w.add_resource.call_args.kwargs['tags'] == tags
+        client.list_tags_for_resource.assert_called_once_with(ResourceARN='arn:aws:budgets::123456789012:budget/monthly')
 
     def test_no_budgets_gathers_nothing(self):
         w = MagicMock()
