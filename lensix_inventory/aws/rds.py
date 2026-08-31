@@ -144,6 +144,10 @@ def gather(region, writer):
             # full subnet group object, so only instances get scope_id.
             scope_id=instance.get('DBSubnetGroup', {}).get('VpcId'),
             raw=raw,
+            # RDS uses TagList, not Tags, across every describe_db_* API —
+            # a genuine RDS API naming quirk, not a typo (same kind of
+            # inconsistency as EC2 ENIs' own TagSet).
+            tags=instance.get('TagList'),
         )
 
     try:
@@ -155,6 +159,7 @@ def gather(region, writer):
                 resource_id=cid,
                 resource_name=cid,
                 raw=cluster,
+                tags=cluster.get('TagList'),
             )
     except Exception as e:
         writer.add_error(region=region, source='rds (clusters)', message=e)
@@ -168,6 +173,7 @@ def gather(region, writer):
                 resource_id=snap_id,
                 resource_name=snap_id,
                 raw=snap,
+                tags=snap.get('TagList'),
             )
     except Exception as e:
         writer.add_error(region=region, source='rds (snapshots)', message=e)

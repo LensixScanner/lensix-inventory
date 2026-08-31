@@ -5,11 +5,13 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.sns as m
 
 
-def _sns_client(topics, attrs_by_arn=None, attrs_error_arns=None):
+def _sns_client(topics, attrs_by_arn=None, attrs_error_arns=None, tags_by_arn=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'Topics': [{'TopicArn': t} for t in topics]}]
     attrs_by_arn = attrs_by_arn or {}
     attrs_error_arns = attrs_error_arns or set()
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags_for_resource.side_effect = lambda ResourceArn: {'Tags': tags_by_arn.get(ResourceArn, [])}
 
     def _get_attrs(TopicArn):
         if TopicArn in attrs_error_arns:
@@ -29,7 +31,17 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='sns_topic', region='us-east-1',
             resource_id='arn:aws:sns:us-east-1:1:my-topic', resource_name='my-topic', raw=attrs,
+            tags=[],
         )
+
+    def test_topic_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        arn = 'arn:aws:sns:us-east-1:1:my-topic'
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _sns_client([arn], attrs_by_arn={arn: {}}, tags_by_arn={arn: tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_an_attributes_failure_for_one_topic_does_not_abort_the_others(self):
         w = MagicMock()

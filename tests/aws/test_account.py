@@ -8,6 +8,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import botocore.exceptions
+import pytest
 
 import lensix_inventory.aws.account as m
 
@@ -199,6 +200,25 @@ class TestGetSsoPermissionSets:
         assert sets == [{'Name': 'good'}]
 
 
+class TestGetSsoTags:
+    def test_paginates_across_next_token(self):
+        sso = MagicMock()
+        sso.list_tags_for_resource.side_effect = [
+            {'Tags': [{'Key': 'a', 'Value': '1'}], 'NextToken': 'page2'},
+            {'Tags': [{'Key': 'b', 'Value': '2'}]},
+        ]
+        with patch.object(m.boto3, 'client', return_value=sso):
+            tags = m.get_sso_tags('arn:instance', 'arn:resource')
+        assert tags == [{'Key': 'a', 'Value': '1'}, {'Key': 'b', 'Value': '2'}]
+        assert sso.list_tags_for_resource.call_args_list[0].kwargs == {'InstanceArn': 'arn:instance', 'ResourceArn': 'arn:resource'}
+
+    def test_returns_empty_list_on_failure(self):
+        sso = MagicMock()
+        sso.list_tags_for_resource.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=sso):
+            assert m.get_sso_tags('arn:instance', 'arn:resource') == []
+
+
 # --- Regional fetchers ----------------------------------------------------------
 
 class TestGetKmsKeys:
@@ -256,6 +276,24 @@ class TestGetKmsKeys:
         assert keys[0]['_KeyPolicy'] is None
 
 
+class TestGetKmsKeyTags:
+    def test_paginates_across_truncated_marker(self):
+        kms = MagicMock()
+        kms.list_resource_tags.side_effect = [
+            {'Tags': [{'TagKey': 'a', 'TagValue': '1'}], 'Truncated': True, 'NextMarker': 'm2'},
+            {'Tags': [{'TagKey': 'b', 'TagValue': '2'}], 'Truncated': False},
+        ]
+        with patch.object(m.boto3, 'client', return_value=kms):
+            tags = m.get_kms_key_tags('us-east-1', 'k1')
+        assert tags == [{'TagKey': 'a', 'TagValue': '1'}, {'TagKey': 'b', 'TagValue': '2'}]
+
+    def test_returns_empty_list_on_failure(self):
+        kms = MagicMock()
+        kms.list_resource_tags.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=kms):
+            assert m.get_kms_key_tags('us-east-1', 'k1') == []
+
+
 class TestGetCloudtrailTrails:
     def test_merges_event_selectors_status_and_bucket_metadata(self):
         def _client(service, region_name=None):
@@ -295,6 +333,24 @@ class TestGetCloudtrailTrails:
         ct.describe_trails.side_effect = RuntimeError('boom')
         with patch.object(m.boto3, 'client', return_value=ct):
             assert m.get_cloudtrail_trails('us-east-1') == []
+
+
+class TestGetTrailTags:
+    def test_returns_the_matching_trails_own_tags_list(self):
+        ct = MagicMock()
+        ct.list_tags.return_value = {'ResourceTagList': [
+            {'ResourceId': 'arn:1', 'TagsList': [{'Key': 'lensix-suppress', 'Value': 'true'}]},
+        ]}
+        with patch.object(m.boto3, 'client', return_value=ct):
+            tags = m.get_trail_tags('us-east-1', 'arn:1')
+        assert tags == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        ct.list_tags.assert_called_once_with(ResourceIdList=['arn:1'])
+
+    def test_returns_empty_list_on_failure(self):
+        ct = MagicMock()
+        ct.list_tags.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=ct):
+            assert m.get_trail_tags('us-east-1', 'arn:1') == []
 
 
 class TestGetConfigRecorders:
@@ -349,6 +405,24 @@ class TestGetConfigAggregators:
             assert m.get_config_aggregators('us-east-1') == []
 
 
+class TestGetConfigAggregatorTags:
+    def test_paginates_across_next_token(self):
+        cfg = MagicMock()
+        cfg.list_tags_for_resource.side_effect = [
+            {'Tags': [{'Key': 'a', 'Value': '1'}], 'NextToken': 'page2'},
+            {'Tags': [{'Key': 'b', 'Value': '2'}]},
+        ]
+        with patch.object(m.boto3, 'client', return_value=cfg):
+            tags = m.get_config_aggregator_tags('us-east-1', 'arn:agg1')
+        assert tags == [{'Key': 'a', 'Value': '1'}, {'Key': 'b', 'Value': '2'}]
+
+    def test_returns_empty_list_on_failure(self):
+        cfg = MagicMock()
+        cfg.list_tags_for_resource.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=cfg):
+            assert m.get_config_aggregator_tags('us-east-1', 'arn:agg1') == []
+
+
 class TestGetGuarddutyDetectors:
     def test_merges_detector_id_into_each_detail(self):
         gd = MagicMock()
@@ -399,6 +473,22 @@ class TestGetLogGroups:
         logs.get_paginator.return_value.paginate.side_effect = RuntimeError('boom')
         with patch.object(m.boto3, 'client', return_value=logs):
             assert m.get_log_groups('us-east-1') == []
+
+
+class TestGetLogGroupTags:
+    def test_returns_the_tags_dict(self):
+        logs = MagicMock()
+        logs.list_tags_for_resource.return_value = {'tags': {'lensix-suppress': 'true'}}
+        with patch.object(m.boto3, 'client', return_value=logs):
+            tags = m.get_log_group_tags('us-east-1', 'arn:lg1')
+        assert tags == {'lensix-suppress': 'true'}
+        logs.list_tags_for_resource.assert_called_once_with(resourceArn='arn:lg1')
+
+    def test_returns_empty_dict_on_failure(self):
+        logs = MagicMock()
+        logs.list_tags_for_resource.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=logs):
+            assert m.get_log_group_tags('us-east-1', 'arn:lg1') == {}
 
 
 class TestGetXrayEncryptionConfig:
@@ -506,6 +596,22 @@ class TestGetEventbridgeRules:
         assert events.list_targets_by_rule.call_args.kwargs['EventBusName'] == 'default'
 
 
+class TestGetEventbridgeRuleTags:
+    def test_returns_the_tags_list(self):
+        events = MagicMock()
+        events.list_tags_for_resource.return_value = {'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        with patch.object(m.boto3, 'client', return_value=events):
+            tags = m.get_eventbridge_rule_tags('us-east-1', 'arn:rule1')
+        assert tags == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        events.list_tags_for_resource.assert_called_once_with(ResourceARN='arn:rule1')
+
+    def test_returns_empty_list_on_failure(self):
+        events = MagicMock()
+        events.list_tags_for_resource.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=events):
+            assert m.get_eventbridge_rule_tags('us-east-1', 'arn:rule1') == []
+
+
 class _LimitExceeded(Exception):
     pass
 
@@ -560,6 +666,21 @@ class TestGetRootCredentialReportRow:
 # --- gather_global() orchestration ------------------------------------------
 
 class TestGatherGlobal:
+    # gather_global() also calls get_sso_tags()/get_eventbridge_rule_tags()
+    # for real (they're new, separate tag-fetch calls, not one of the
+    # get_*() list-fetchers every test below already mocks) — an autouse
+    # fixture default-patches both to an empty result so every existing
+    # test here keeps making no live boto3 call, without editing each
+    # one's own `with patch.object(...)` chain individually. Tests that
+    # care about tag passthrough specifically override with their own
+    # nested patch (see test_sso_*_tags_are_passed_through_for_suppression
+    # below).
+    @pytest.fixture(autouse=True)
+    def _tag_helpers(self):
+        with patch.object(m, 'get_sso_tags', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rule_tags', return_value=[]):
+            yield
+
     def test_adds_one_resource_per_role_group_policy_cert_and_device(self):
         w = MagicMock()
         with patch.object(m, 'get_iam_roles', return_value=[{'RoleId': 'r1', 'RoleName': 'my-role'}]), \
@@ -762,10 +883,96 @@ class TestGatherGlobal:
         eb_calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'eventbridge_rule']
         assert {c.kwargs['region'] for c in eb_calls} == {'us-east-1', 'us-west-2'}
 
+    def test_role_policy_and_mfa_device_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        role = {'RoleId': 'r1', 'RoleName': 'r1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        policy = {'Arn': 'arn:p1', 'PolicyName': 'p1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        device = {'SerialNumber': 'arn:mfa1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        with patch.object(m, 'get_iam_roles', return_value=[role]), \
+             patch.object(m, 'get_iam_groups', return_value=[]), \
+             patch.object(m, 'get_iam_policies', return_value=[policy]), \
+             patch.object(m, 'get_iam_server_certificates', return_value=[]), \
+             patch.object(m, 'get_iam_virtual_mfa_devices', return_value=[device]), \
+             patch.object(m, 'get_password_policy', return_value={'_configured': False}), \
+             patch.object(m, 'get_account_summary', return_value={}), \
+             patch.object(m, 'get_support_access_roles', return_value=[]), \
+             patch.object(m, 'get_sso_instances', return_value=[]), \
+             patch.object(m, 'get_root_credential_report_row', return_value=None):
+            m.gather_global(w, '123456789012')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['iam_role'].kwargs['tags'] == role['Tags']
+        assert calls['iam_policy'].kwargs['tags'] == policy['Tags']
+        assert calls['iam_virtual_mfa_device'].kwargs['tags'] == device['Tags']
+
+    def test_sso_instance_and_permission_set_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        instance = {'InstanceArn': 'arn:inst1', 'IdentityStoreId': 'd-1'}
+        ps = {'PermissionSetArn': 'arn:ps1', 'Name': 'AdminAccess'}
+        tags_by_resource_arn = {
+            'arn:inst1': [{'Key': 'lensix-suppress', 'Value': 'true'}],
+            'arn:ps1': [{'Key': 'lensix-suppress-checks', 'Value': 'account_adminaccess'}],
+        }
+        with patch.object(m, 'get_iam_roles', return_value=[]), \
+             patch.object(m, 'get_iam_groups', return_value=[]), \
+             patch.object(m, 'get_iam_policies', return_value=[]), \
+             patch.object(m, 'get_iam_server_certificates', return_value=[]), \
+             patch.object(m, 'get_iam_virtual_mfa_devices', return_value=[]), \
+             patch.object(m, 'get_password_policy', return_value={'_configured': False}), \
+             patch.object(m, 'get_account_summary', return_value={}), \
+             patch.object(m, 'get_support_access_roles', return_value=[]), \
+             patch.object(m, 'get_sso_instances', return_value=[instance]), \
+             patch.object(m, 'get_sso_permission_sets', return_value=[ps]), \
+             patch.object(m, 'get_sso_tags', side_effect=lambda instance_arn, resource_arn: tags_by_resource_arn.get(resource_arn, [])), \
+             patch.object(m, 'get_root_credential_report_row', return_value=None):
+            m.gather_global(w, '123456789012')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['sso_instance'].kwargs['tags'] == tags_by_resource_arn['arn:inst1']
+        assert calls['sso_permission_set'].kwargs['tags'] == tags_by_resource_arn['arn:ps1']
+
+    def test_regional_eventbridge_rule_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        trail = {'CloudWatchLogsLogGroupArn': 'arn:aws:logs:us-east-1:1:log-group:my-lg:*'}
+        rule = {'Name': 'r1', 'Arn': 'arn:rule1', '_Targets': []}
+        with patch.object(m, 'get_iam_roles', return_value=[]), \
+             patch.object(m, 'get_iam_groups', return_value=[]), \
+             patch.object(m, 'get_iam_policies', return_value=[]), \
+             patch.object(m, 'get_iam_server_certificates', return_value=[]), \
+             patch.object(m, 'get_iam_virtual_mfa_devices', return_value=[]), \
+             patch.object(m, 'get_password_policy', return_value={'_configured': False}), \
+             patch.object(m, 'get_account_summary', return_value={}), \
+             patch.object(m, 'get_support_access_roles', return_value=[]), \
+             patch.object(m, 'get_sso_instances', return_value=[]), \
+             patch.object(m, 'get_root_credential_report_row', return_value=None), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[trail]), \
+             patch.object(m, 'get_metric_filters_with_alarms', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[rule]), \
+             patch.object(m, 'get_eventbridge_rule_tags', return_value=[{'Key': 'lensix-suppress', 'Value': 'true'}]) as get_tags:
+            m.gather_global(w, '123456789012', regions=['us-east-1'])
+        get_tags.assert_called_once_with('us-east-1', 'arn:rule1')
+        eb_calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'eventbridge_rule']
+        assert eb_calls[0].kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+
 
 # --- gather() orchestration --------------------------------------------------
 
 class TestGather:
+    # gather() also calls get_kms_key_tags()/get_trail_tags()/
+    # get_eventbridge_rule_tags()/get_config_aggregator_tags()/
+    # get_log_group_tags() for real — see TestGatherGlobal's own
+    # _tag_helpers fixture above for why this is an autouse default
+    # rather than editing every test below individually. guardduty_detector
+    # and access_analyzer need no helper here — their tags are inline on
+    # the dicts get_guardduty_detectors()/get_access_analyzers() already
+    # return, which every test below already controls directly.
+    @pytest.fixture(autouse=True)
+    def _tag_helpers(self):
+        with patch.object(m, 'get_kms_key_tags', return_value=[]), \
+             patch.object(m, 'get_trail_tags', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rule_tags', return_value=[]), \
+             patch.object(m, 'get_config_aggregator_tags', return_value=[]), \
+             patch.object(m, 'get_log_group_tags', return_value={}):
+            yield
+
     def test_adds_one_resource_per_kms_key_named_from_its_alias(self):
         w = MagicMock()
         key = {'KeyId': 'k1', '_Aliases': [{'AliasName': 'alias/my-key'}]}
@@ -921,3 +1128,117 @@ class TestGather:
             'account (log groups)', 'account (xray encryption config)', 'account (eventbridge rules)',
         }
         w.add_resource.assert_not_called()
+
+    def test_kms_key_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        key = {'KeyId': 'k1', '_Aliases': []}
+        with patch.object(m, 'get_kms_keys', return_value=[key]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[]), \
+             patch.object(m, 'get_access_analyzers', return_value=[]), \
+             patch.object(m, 'get_log_groups', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None), \
+             patch.object(m, 'get_kms_key_tags', return_value=[{'Key': 'lensix-suppress', 'Value': 'true'}]) as get_tags:
+            m.gather('us-east-1', w)
+        get_tags.assert_called_once_with('us-east-1', 'k1')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['kms_key'].kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+
+    def test_trail_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        trail = {'TrailARN': 'arn:t1', 'Name': 'trail1'}
+        with patch.object(m, 'get_kms_keys', return_value=[]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[trail]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[]), \
+             patch.object(m, 'get_access_analyzers', return_value=[]), \
+             patch.object(m, 'get_log_groups', return_value=[]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None), \
+             patch.object(m, 'get_trail_tags', return_value=[{'Key': 'lensix-suppress', 'Value': 'true'}]) as get_tags:
+            m.gather('us-east-1', w)
+        get_tags.assert_called_once_with('us-east-1', 'arn:t1')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['cloudtrail_trail'].kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+
+    def test_regional_eventbridge_rule_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        rule = {'Name': 'my-rule', 'Arn': 'arn:rule1', '_Targets': []}
+        with patch.object(m, 'get_kms_keys', return_value=[]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[rule]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[]), \
+             patch.object(m, 'get_access_analyzers', return_value=[]), \
+             patch.object(m, 'get_log_groups', return_value=[]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None), \
+             patch.object(m, 'get_eventbridge_rule_tags', return_value=[{'Key': 'lensix-suppress', 'Value': 'true'}]) as get_tags:
+            m.gather('us-east-1', w)
+        get_tags.assert_called_once_with('us-east-1', 'arn:rule1')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['eventbridge_rule'].kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+
+    def test_config_aggregator_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        agg = {'ConfigurationAggregatorName': 'agg1', 'ConfigurationAggregatorArn': 'arn:agg1'}
+        with patch.object(m, 'get_kms_keys', return_value=[]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[agg]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[]), \
+             patch.object(m, 'get_access_analyzers', return_value=[]), \
+             patch.object(m, 'get_log_groups', return_value=[]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None), \
+             patch.object(m, 'get_config_aggregator_tags', return_value=[{'Key': 'lensix-suppress', 'Value': 'true'}]) as get_tags:
+            m.gather('us-east-1', w)
+        get_tags.assert_called_once_with('us-east-1', 'arn:agg1')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['config_aggregator'].kwargs['tags'] == [{'Key': 'lensix-suppress', 'Value': 'true'}]
+
+    def test_guardduty_detector_and_access_analyzer_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        detector = {'DetectorId': 'd1', 'Tags': {'lensix-suppress': 'true'}}
+        analyzer = {'arn': 'arn:a1', 'name': 'analyzer1', 'tags': {'lensix-suppress': 'true'}}
+        with patch.object(m, 'get_kms_keys', return_value=[]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[detector]), \
+             patch.object(m, 'get_access_analyzers', return_value=[analyzer]), \
+             patch.object(m, 'get_log_groups', return_value=[]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['guardduty_detector'].kwargs['tags'] == {'lensix-suppress': 'true'}
+        assert calls['access_analyzer'].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_log_group_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        lg = {'logGroupName': '/my/group', 'arn': 'arn:lg1'}
+        with patch.object(m, 'get_kms_keys', return_value=[]), \
+             patch.object(m, 'get_cloudtrail_trails', return_value=[]), \
+             patch.object(m, 'get_eventbridge_rules', return_value=[]), \
+             patch.object(m, 'get_config_recorders', return_value=[]), \
+             patch.object(m, 'get_config_delivery_channels', return_value=[]), \
+             patch.object(m, 'get_config_aggregators', return_value=[]), \
+             patch.object(m, 'get_guardduty_detectors', return_value=[]), \
+             patch.object(m, 'get_access_analyzers', return_value=[]), \
+             patch.object(m, 'get_log_groups', return_value=[lg]), \
+             patch.object(m, 'get_xray_encryption_config', return_value=None), \
+             patch.object(m, 'get_log_group_tags', return_value={'lensix-suppress': 'true'}) as get_tags:
+            m.gather('us-east-1', w)
+        get_tags.assert_called_once_with('us-east-1', 'arn:lg1')
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['cloudwatch_log_group'].kwargs['tags'] == {'lensix-suppress': 'true'}

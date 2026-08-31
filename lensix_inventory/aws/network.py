@@ -4,6 +4,9 @@ describe_addresses returns every Elastic IP in the region (attached or
 not) in one shot. "Unattached == unused" is evaluation, not gathering:
 every EIP, attached or not, is uploaded here and Lensix determines "unused"
 server-side from the presence/absence of AssociationId.
+
+Tags are already inline (EC2-family {'Key','Value'} list) — passed
+straight through to add_resource() for tag-based suppression.
 """
 
 import boto3
@@ -25,4 +28,5 @@ def gather(region, writer):
             resource_id=alloc,
             resource_name=ip,
             raw=eip,
+            tags=eip.get('Tags'),
         )

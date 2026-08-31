@@ -85,6 +85,14 @@ class TestGather:
         assert kwargs['raw']['_LoggingStatus'] == {'LoggingEnabled': True}
         assert kwargs['raw']['_SSLParameters']['pg-1']['ParameterName'] == 'require_ssl'
 
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'ClusterIdentifier': 'c1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _redshift_client([cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == cluster['Tags']
+
     def test_falls_back_to_cluster_identifier_when_namespace_arn_missing(self):
         w = MagicMock()
         cluster = {'ClusterIdentifier': 'c1'}

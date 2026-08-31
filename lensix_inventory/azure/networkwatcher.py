@@ -31,13 +31,15 @@ def gather(credential, subscription_id, writer):
     for watcher in watchers:
         region = watcher.location or 'global'
         rg = _resource_group(watcher.id)
+        watcher_raw = watcher.as_dict()
         writer.add_resource(
             resource_type='network_watcher',
             region=region,
             resource_id=watcher.id,
             resource_name=watcher.name,
             scope_id=rg,
-            raw=watcher.as_dict(),
+            raw=watcher_raw,
+            tags=watcher_raw.get('tags'),
         )
 
         try:
@@ -47,11 +49,13 @@ def gather(credential, subscription_id, writer):
             continue
 
         for fl in flow_logs:
+            fl_raw = fl.as_dict()
             writer.add_resource(
                 resource_type='flow_log',
                 region=region,
                 resource_id=fl.id,
                 resource_name=fl.name,
                 scope_id=rg,
-                raw=fl.as_dict(),
+                raw=fl_raw,
+                tags=fl_raw.get('tags'),
             )

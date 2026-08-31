@@ -8,7 +8,7 @@ import botocore.exceptions
 import lensix_inventory.aws.workspaces as m
 
 
-def _client(workspaces=None, ip_groups=None, directories=None):
+def _client(workspaces=None, ip_groups=None, directories=None, tags_by_resource_id=None):
     client = MagicMock()
 
     def _paginator(op_name):
@@ -22,6 +22,8 @@ def _client(workspaces=None, ip_groups=None, directories=None):
         return p
 
     client.get_paginator.side_effect = _paginator
+    tags_by_resource_id = tags_by_resource_id or {}
+    client.describe_tags.side_effect = lambda ResourceId: {'TagList': tags_by_resource_id.get(ResourceId, [])}
     return client
 
 
@@ -33,8 +35,18 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_any_call(
             resource_type='workspace', region='us-east-1',
-            resource_id='ws-abc123', resource_name='WS-ALICE', raw=ws,
+            resource_id='ws-abc123', resource_name='WS-ALICE', raw=ws, tags=[],
         )
+
+    def test_workspace_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        ws = {'WorkspaceId': 'ws-abc123'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _client(workspaces=[ws], tags_by_resource_id={'ws-abc123': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        ws_call = next(c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'workspace')
+        assert ws_call.kwargs['tags'] == tags
 
     def test_falls_back_to_the_workspace_id_without_a_computer_name(self):
         w = MagicMock()
@@ -58,7 +70,7 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_any_call(
             resource_type='workspaces_ip_group', region='us-east-1',
-            resource_id='wsipg-1', resource_name='my-group', raw=group,
+            resource_id='wsipg-1', resource_name='my-group', raw=group, tags=[],
         )
 
     def test_ip_group_falls_back_to_group_id_without_a_name(self):
@@ -76,7 +88,7 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_any_call(
             resource_type='workspaces_directory', region='us-east-1',
-            resource_id='d-1', resource_name='my-dir', raw=directory,
+            resource_id='d-1', resource_name='my-dir', raw=directory, tags=[],
         )
 
     def test_directory_falls_back_to_directory_id_without_a_name(self):

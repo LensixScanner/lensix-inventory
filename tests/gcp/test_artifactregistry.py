@@ -5,8 +5,11 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.artifactregistry as m
 
 
-def _repo(*, name='projects/p/locations/us/repositories/prod-images'):
-    return {'name': name, 'format': 'DOCKER'}
+def _repo(*, name='projects/p/locations/us/repositories/prod-images', labels=None):
+    r = {'name': name, 'format': 'DOCKER'}
+    if labels is not None:
+        r['labels'] = labels
+    return r
 
 
 def _ar_client(repos, iam_by_name=None):
@@ -121,6 +124,14 @@ class TestGather:
             m.gather('p', MagicMock(), writer)
         assert writer.add_resource.call_count == 2
         assert writer.add_error.call_count == 1
+
+    def test_tags_are_passed_through_from_labels(self):
+        repo = _repo(labels={'lensix-suppress': 'true'})
+        ar = _ar_client([repo])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=ar):
+            m.gather('p', MagicMock(), writer)
+        assert writer.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_repos_adds_nothing(self):
         ar = _ar_client([])

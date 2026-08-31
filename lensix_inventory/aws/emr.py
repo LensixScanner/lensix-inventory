@@ -62,4 +62,5 @@ def gather(region, writer):
             resource_id=cluster_id,
             resource_name=name,
             raw=raw,
+            tags=cluster.get('Tags'),
         )

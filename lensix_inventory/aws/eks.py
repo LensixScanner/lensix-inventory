@@ -37,4 +37,8 @@ def gather(region, writer):
             resource_name=name,
             scope_id=cluster.get('resourcesVpcConfig', {}).get('vpcId'),
             raw=cluster,
+            # Unlike ECS, EKS's own describe_cluster response already
+            # includes tags inline — as a flat {key: value} map, not a
+            # list, and no extra API call needed.
+            tags=cluster.get('tags'),
         )

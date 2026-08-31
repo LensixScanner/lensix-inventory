@@ -6,8 +6,15 @@ import lensix_inventory.aws.route53 as m
 
 
 def _client(domain_pages=None, detail_by_domain=None, detail_error_domains=None,
-            zone_pages=None, txt_by_zone=None, domains_raise=False, zones_raise=False):
+            zone_pages=None, txt_by_zone=None, domains_raise=False, zones_raise=False,
+            domain_tags=None, zone_tags=None):
     client = MagicMock()
+    domain_tags = domain_tags or {}
+    client.list_tags_for_domain.side_effect = lambda DomainName: {'TagList': domain_tags.get(DomainName, [])}
+    zone_tags = zone_tags or {}
+    client.list_tags_for_resource.side_effect = lambda ResourceType, ResourceId: {
+        'ResourceTagSet': {'ResourceId': ResourceId, 'ResourceType': ResourceType, 'Tags': zone_tags.get(ResourceId, [])}
+    }
     if domains_raise:
         client.list_domains.side_effect = RuntimeError('boom')
     else:
@@ -95,6 +102,19 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['route53_domain'].kwargs['resource_id'] == 'example.com'
 
+    def test_domain_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _client(
+            domain_pages=[{'Domains': [{'DomainName': 'example.com'}]}],
+            detail_by_domain={'example.com': {'DomainName': 'example.com'}},
+            domain_tags={'example.com': tags},
+        )
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['route53_domain'].kwargs['tags'] == tags
+
     def test_a_domain_detail_failure_does_not_abort_the_others(self):
         w = MagicMock()
         client = _client(
@@ -132,6 +152,17 @@ class TestGather:
         assert zone_call.kwargs['resource_id'] == 'Z1'
         assert zone_call.kwargs['resource_name'] == 'example.com'
         assert len(zone_call.kwargs['raw']['_ApexTxtRecordSets']) == 1
+
+    def test_zone_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _client(zone_pages=[{'HostedZones': [
+            {'Id': '/hostedzone/Z1', 'Name': 'example.com.', 'Config': {'PrivateZone': False}},
+        ]}], zone_tags={'Z1': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['route53_zone'].kwargs['tags'] == tags
 
     def test_a_zones_service_failure_does_not_abort_the_whole_gather(self):
         w = MagicMock()

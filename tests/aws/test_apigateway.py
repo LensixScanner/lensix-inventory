@@ -183,6 +183,62 @@ class TestGather:
         calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_domain']
         assert calls[0].kwargs['raw']['_ApiType'] == 'HTTP'
 
+    def test_rest_api_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        api = {'id': 'a1', 'name': 'my-api', 'tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(rest_apis=[api])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_rest_api']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_rest_stage_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        api = {'id': 'a1', 'name': 'my-api'}
+        stage = {'stageName': 'prod', 'tags': {'lensix-suppress-checks': 'apigw_stage_accesslogging'}}
+        client_fn = _clients(rest_apis=[api], stages_by_api={'a1': [stage]})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_stage']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress-checks': 'apigw_stage_accesslogging'}
+
+    def test_http_api_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        api = {'ApiId': 'h1', 'Name': 'my-http-api', 'Tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(http_apis=[api])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_http_api']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_http_stage_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        api = {'ApiId': 'h1', 'Name': 'my-http-api'}
+        stage = {'StageName': 'prod', 'Tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(http_apis=[api], http_stages_by_api={'h1': [stage]})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_stage']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_v1_domain_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        domain = {'domainName': 'api.example.com', 'tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(v1_domains=[domain])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_domain']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_v2_domain_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        domain = {'DomainName': 'api2.example.com', 'Tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(v2_domains=[domain])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_domain']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
+
     def test_each_of_the_four_top_level_fetches_is_isolated_from_the_others(self):
         w = MagicMock()
         client_fn = _clients(rest_apis_raise=True, http_apis_raise=True, v1_domains_raise=True, v2_domains_raise=True)

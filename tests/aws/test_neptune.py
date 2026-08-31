@@ -27,8 +27,16 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='neptune_cluster', region='us-east-1',
-            resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster,
+            resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster, tags=None,
         )
+
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'Engine': 'neptune', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        with patch.object(m.boto3, 'client', return_value=_neptune([cluster])):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == cluster['TagList']
 
     def test_falls_back_to_arn_as_name_when_identifier_missing(self):
         w = MagicMock()

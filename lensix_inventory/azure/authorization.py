@@ -18,6 +18,13 @@ def get_custom_role_definitions(credential, subscription_id):
 
 
 def gather(credential, subscription_id, writer):
+    # No tags= here (unlike most other Azure gather modules): RBAC role
+    # definitions (Microsoft.Authorization/roleDefinitions) are a
+    # control-plane object, not an ARM resource with the usual `tags`
+    # property — confirmed absent from RoleDefinition's own attribute map
+    # — so there's genuinely nothing to pass through, matching AWS's
+    # iam_group/iam_server_certificate N/A precedent (see
+    # docs/tag-suppressions.md).
     for role_def in get_custom_role_definitions(credential, subscription_id):
         writer.add_resource(
             resource_type='role_definition',

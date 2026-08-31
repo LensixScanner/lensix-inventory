@@ -7,9 +7,11 @@ import lensix_inventory.aws.ecr as m
 
 
 def _ecr_client(repos, scan_rules=None, scan_config_raises=False,
-                 policy_by_name=None, policy_raises_names=None):
+                 policy_by_name=None, policy_raises_names=None, tags_by_arn=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'repositories': repos}]
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags_for_resource.side_effect = lambda resourceArn: {'tags': tags_by_arn.get(resourceArn, [])}
 
     if scan_config_raises:
         client.get_registry_scanning_configuration.side_effect = RuntimeError('boom')
@@ -74,6 +76,17 @@ class TestGather:
         assert repo_call.kwargs['resource_id'] == 'arn:aws:ecr:us-east-1:1:repository/my-repo'
         assert repo_call.kwargs['resource_name'] == 'my-repo'
         assert repo_call.kwargs['raw']['_RepositoryPolicy'] == {'Statement': []}
+
+    def test_repository_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        arn = 'arn:aws:ecr:us-east-1:1:repository/my-repo'
+        repo = {'repositoryName': 'my-repo', 'repositoryArn': arn}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _ecr_client([repo], tags_by_arn={arn: tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ecr_repository'].kwargs['tags'] == tags
 
     def test_a_repository_without_a_policy_gets_none(self):
         w = MagicMock()

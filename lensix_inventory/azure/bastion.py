@@ -17,11 +17,13 @@ def get_bastion_hosts(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for host in get_bastion_hosts(credential, subscription_id):
+        raw = _as_dict(host)
         writer.add_resource(
             resource_type='bastion_host',
             region=host.location or 'global',
             resource_id=host.id,
             resource_name=host.name,
             scope_id=_resource_group(host.id),
-            raw=_as_dict(host),
+            raw=raw,
+            tags=raw.get('tags'),
         )

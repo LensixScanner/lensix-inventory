@@ -183,6 +183,7 @@ def gather(region, writer):
             scope_id=inst.get('VpcId'),
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=inst.get('Tags'),
         )
 
     try:
@@ -199,6 +200,9 @@ def gather(region, writer):
             resource_name=eni.get('Description') or eni_id,
             scope_id=eni.get('VpcId'),
             raw=eni,
+            # ENIs use TagSet, not Tags, in describe_network_interfaces'
+            # response shape — a genuine AWS API inconsistency, not a typo.
+            tags=eni.get('TagSet'),
         )
 
     try:
@@ -220,4 +224,5 @@ def gather(region, writer):
             resource_id=lt_id,
             resource_name=lt.get('LaunchTemplateName', lt_id),
             raw=raw,
+            tags=lt.get('Tags'),
         )

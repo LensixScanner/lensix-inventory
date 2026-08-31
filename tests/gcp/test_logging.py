@@ -94,6 +94,16 @@ class TestGather:
         assert calls['log_sink'].kwargs['resource_id'] == 'projects/p/sinks/s1'
         assert calls['log_based_metric'].kwargs['resource_id'] == 'projects/p/metrics/m1'
         assert calls['alert_policy'].kwargs['resource_name'] == 'My Alert'
+        assert calls['alert_policy'].kwargs['tags'] is None
+
+    def test_alert_policy_tags_are_passed_through_from_userlabels(self):
+        w = MagicMock()
+        build = _clients(alert_policies=[{'name': 'projects/p/alertPolicies/a1', 'displayName': 'My Alert',
+                                           'userLabels': {'lensix-suppress': 'true'}}])
+        with patch.object(m.discovery, 'build', side_effect=build):
+            m.gather('p', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['alert_policy'].kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_a_sink_with_a_live_destination_bucket_gets_exists_true(self):
         w = MagicMock()

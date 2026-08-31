@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.cicd as m
 
 
-def _client(repos=None, cb_names=None, cb_projects=None, repos_raise=False, cb_raise=False):
+def _client(repos=None, cb_names=None, cb_projects=None, repos_raise=False, cb_raise=False, tags_by_repo_name=None):
     client = MagicMock()
     if repos_raise:
         client.get_paginator.return_value.paginate.side_effect = RuntimeError('boom')
@@ -17,6 +17,19 @@ def _client(repos=None, cb_names=None, cb_projects=None, repos_raise=False, cb_r
     else:
         client.list_projects.side_effect = [{'projects': cb_names or []}]
     client.batch_get_projects.return_value = {'projects': cb_projects or []}
+
+    # get_repository_tags() needs a real ARN and a real (non-MagicMock)
+    # {'tags': ..., 'nextToken': ...} response — an unconfigured MagicMock's
+    # .get('nextToken') is always truthy, which would spin its while-True
+    # pagination loop forever (the same trap documented across this
+    # rollout for every other paginated tag-fetch call).
+    tags_by_repo_name = tags_by_repo_name or {}
+    client.get_repository.side_effect = lambda repositoryName: {
+        'repositoryMetadata': {'Arn': f'arn:aws:codecommit:us-east-1:1:{repositoryName}'}
+    }
+    client.list_tags_for_resource.side_effect = lambda resourceArn: {
+        'tags': tags_by_repo_name.get(resourceArn.rsplit(':', 1)[-1], {})
+    }
     return client
 
 
@@ -78,6 +91,25 @@ class TestGather:
         proj_call = calls['codebuild_project']
         assert proj_call.kwargs['resource_id'] == 'arn:aws:codebuild:us-east-1:1:project/p1'
         assert proj_call.kwargs['raw']['environment']['environmentVariables'] == [{'name': 'X', 'type': 'PLAINTEXT'}]
+
+    def test_codecommit_repo_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        repo = {'repositoryId': 'r1', 'repositoryName': 'my-repo'}
+        client = _client(repos=[repo], tags_by_repo_name={'my-repo': {'lensix-suppress': 'true'}})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['codecommit_repo'].kwargs['tags'] == {'lensix-suppress': 'true'}
+
+    def test_codebuild_project_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        project = {'name': 'p1', 'arn': 'arn:aws:codebuild:us-east-1:1:project/p1',
+                   'tags': [{'key': 'lensix-suppress', 'value': 'true'}]}
+        client = _client(cb_names=['p1'], cb_projects=[project])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['codebuild_project'].kwargs['tags'] == [{'key': 'lensix-suppress', 'value': 'true'}]
 
     def test_a_codecommit_failure_does_not_prevent_codebuild_from_being_gathered(self):
         w = MagicMock()

@@ -25,7 +25,8 @@ def _fn(**overrides):
 
 def _client_for(functions, policy_by_fn=None, log_groups_by_fn=None,
                  role_get_role_raise=None, role_attached_policies=None,
-                 role_policy_docs=None, role_inline_policies=None, role_inline_docs=None):
+                 role_policy_docs=None, role_inline_policies=None, role_inline_docs=None,
+                 tags_by_arn=None):
     """Builds a boto3.client(service, ...) dispatcher for 'lambda', 'logs',
     and 'iam' — every sub-call lambda_.py's gather() now makes, each with a
     safe default so an unconfigured test doesn't hang on an
@@ -34,6 +35,8 @@ def _client_for(functions, policy_by_fn=None, log_groups_by_fn=None,
     lambda_client.get_paginator.return_value.paginate.return_value = [{'Functions': functions}]
     lambda_client.exceptions.ResourceNotFoundException = _ResourceNotFoundException
     policy_by_fn = policy_by_fn or {}
+    tags_by_arn = tags_by_arn or {}
+    lambda_client.list_tags.side_effect = lambda Resource: {'Tags': tags_by_arn.get(Resource, {})}
 
     def _get_policy(FunctionName):
         if FunctionName in policy_by_fn:
@@ -115,7 +118,30 @@ class TestDocHasWildcardAdmin:
         assert m._doc_has_wildcard_admin(None) is False
 
 
+class TestGetFunctionTags:
+    def test_returns_the_tag_dict(self):
+        client = MagicMock()
+        client.list_tags.return_value = {'Tags': {'env': 'prod'}}
+        with patch.object(m.boto3, 'client', return_value=client):
+            assert m.get_function_tags('us-east-1', 'arn:aws:lambda:us-east-1:1:function:my-fn') == {'env': 'prod'}
+
+    def test_a_failure_returns_an_empty_dict(self):
+        client = MagicMock()
+        client.list_tags.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=client):
+            assert m.get_function_tags('us-east-1', 'arn:1') == {}
+
+
 class TestGather:
+    def test_function_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        fn = _fn()
+        arn = fn['FunctionArn']
+        with patch.object(m.boto3, 'client', side_effect=_client_for([fn], tags_by_arn={arn: {'lensix-suppress': 'true'}})):
+            m.gather('us-east-1', w)
+        _, kwargs = w.add_resource.call_args
+        assert kwargs['tags'] == {'lensix-suppress': 'true'}
+
     def test_adds_one_resource_with_env_values_stripped(self):
         w = MagicMock()
         fn = _fn(Environment={'Variables': {'STAGE': 'prod'}})

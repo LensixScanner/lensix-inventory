@@ -33,7 +33,7 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='efs_filesystem', region='us-east-1',
-            resource_id='fs-1', resource_name='shared-data', raw=fs,
+            resource_id='fs-1', resource_name='shared-data', raw=fs, tags=fs['Tags'],
         )
 
     def test_no_file_systems_gathers_nothing(self):

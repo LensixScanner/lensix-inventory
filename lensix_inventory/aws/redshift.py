@@ -64,4 +64,5 @@ def gather(region, writer):
             resource_name=cid,
             scope_id=cluster.get('VpcId'),
             raw=raw,
+            tags=cluster.get('Tags'),
         )

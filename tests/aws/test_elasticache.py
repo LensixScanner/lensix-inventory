@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.elasticache as m
 
 
-def _ec_client(rg_pages=None, cluster_pages=None, rg_raises=False, cluster_raises=False):
+def _ec_client(rg_pages=None, cluster_pages=None, rg_raises=False, cluster_raises=False, tags_by_arn=None):
     client = MagicMock()
     if rg_raises:
         client.describe_replication_groups.side_effect = RuntimeError('boom')
@@ -15,6 +15,8 @@ def _ec_client(rg_pages=None, cluster_pages=None, rg_raises=False, cluster_raise
         client.describe_cache_clusters.side_effect = RuntimeError('boom')
     else:
         client.describe_cache_clusters.side_effect = cluster_pages or [{'CacheClusters': []}]
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags_for_resource.side_effect = lambda ResourceName: {'TagList': tags_by_arn.get(ResourceName, [])}
     return client
 
 
@@ -58,6 +60,28 @@ class TestGather:
             m.gather('us-east-1', w)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['elasticache_cluster'].kwargs['resource_id'] == 'arn:aws:elasticache:us-east-1:1:cluster:c1'
+
+    def test_replication_group_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:replicationgroup:rg1'
+        rg = {'ReplicationGroupId': 'rg1', 'ARN': arn}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _ec_client(rg_pages=[{'ReplicationGroups': [rg]}], tags_by_arn={arn: tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_replication_group'].kwargs['tags'] == tags
+
+    def test_cache_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:cluster:c1'
+        cluster = {'CacheClusterId': 'c1', 'ARN': arn}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}], tags_by_arn={arn: tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_cluster'].kwargs['tags'] == tags
 
     def test_falls_back_to_the_bare_id_when_arn_missing(self):
         w = MagicMock()

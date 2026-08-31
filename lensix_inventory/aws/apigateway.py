@@ -6,6 +6,11 @@ get_http_apis, get_http_stages, get_v1_domain_names, get_v2_domain_names);
 access-logging, cache-encryption, tracing, TLS-policy, and public-access
 evaluation is left server-side.
 
+All four resource types carry tags inline in their own describe/get
+response already (v1's `tags`, v2's `Tags` — both already-flat dicts, no
+separate tag-fetch call needed) — passed straight through to
+add_resource() for tag-based suppression.
+
 Two simplifications relative to a naive per-check fan-out:
   - The attached WAF Web ACL (wafv2.get_web_acl_for_resource) IS raw
     per-resource data (which Web ACL, if any, protects this stage) rather
@@ -97,7 +102,7 @@ def gather(region, writer):
     for api in rest_apis:
         writer.add_resource(
             resource_type='apigw_rest_api', region=region, resource_id=api['id'],
-            resource_name=api.get('name', api['id']), raw=api,
+            resource_name=api.get('name', api['id']), raw=api, tags=api.get('tags'),
         )
 
     for api in rest_apis:
@@ -120,7 +125,7 @@ def gather(region, writer):
                 writer.add_error(region=region, source=f'apigw_stage:{api_id}/{stage_name}', message=e)
             writer.add_resource(
                 resource_type='apigw_stage', region=region, resource_id=f'{api_id}/{stage_name}',
-                resource_name=f'{api_name}/{stage_name}', raw=raw,
+                resource_name=f'{api_name}/{stage_name}', raw=raw, tags=stage.get('tags'),
             )
 
     try:
@@ -131,7 +136,7 @@ def gather(region, writer):
     for api in http_apis:
         writer.add_resource(
             resource_type='apigw_http_api', region=region, resource_id=api['ApiId'],
-            resource_name=api.get('Name', api['ApiId']), raw=api,
+            resource_name=api.get('Name', api['ApiId']), raw=api, tags=api.get('Tags'),
         )
 
     for api in http_apis:
@@ -150,7 +155,7 @@ def gather(region, writer):
             raw['_ApiType'] = 'HTTP'
             writer.add_resource(
                 resource_type='apigw_stage', region=region, resource_id=f'{api_id}/{stage_name}',
-                resource_name=f'{api_name}/{stage_name}', raw=raw,
+                resource_name=f'{api_name}/{stage_name}', raw=raw, tags=stage.get('Tags'),
             )
 
     try:
@@ -164,7 +169,7 @@ def gather(region, writer):
         raw['_ApiType'] = 'REST'
         writer.add_resource(
             resource_type='apigw_domain', region=region, resource_id=name,
-            resource_name=name, raw=raw,
+            resource_name=name, raw=raw, tags=domain.get('tags'),
         )
 
     try:
@@ -178,5 +183,5 @@ def gather(region, writer):
         raw['_ApiType'] = 'HTTP'
         writer.add_resource(
             resource_type='apigw_domain', region=region, resource_id=name,
-            resource_name=name, raw=raw,
+            resource_name=name, raw=raw, tags=domain.get('Tags'),
         )

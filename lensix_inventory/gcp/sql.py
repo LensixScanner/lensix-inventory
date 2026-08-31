@@ -50,4 +50,8 @@ def gather(project_id, credentials, writer):
             resource_name=name,
             scope_id=_util.extract_network_name(network),
             raw=instance,
+            # Cloud SQL's tags-equivalent field is settings.userLabels, not
+            # a top-level `labels` key — same userLabels naming quirk as
+            # Cloud Monitoring's AlertPolicy (see logging.py).
+            tags=instance.get('settings', {}).get('userLabels'),
         )

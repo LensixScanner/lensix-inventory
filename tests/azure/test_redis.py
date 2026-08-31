@@ -25,7 +25,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='redis_cache', region='eastus', resource_id=cache.id,
             resource_name='c1', scope_id='my-rg', raw={'id': cache.id, 'name': 'c1'},
+            tags=None,
         )
+
+    def test_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cache = _cache()
+        cache.as_dict.return_value = {'id': cache.id, 'name': 'c1', 'tags': {'lensix-suppress': 'true'}}
+        client = MagicMock()
+        client.redis.list.return_value = [cache]
+        with patch('azure.mgmt.redis.RedisManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_global_region_without_a_location(self):
         w = MagicMock()

@@ -85,6 +85,9 @@ def gather(project_id, credentials, writer):
 
         for key_ring in key_rings:
             key_ring_name = key_ring.get('name', '')
+            # No tags= here: KeyRing has no `labels` field in the Cloud KMS
+            # API at all (only CryptoKey does) — a genuine architectural
+            # N/A, not an oversight.
             writer.add_resource(
                 resource_type='kms_keyring',
                 region=location_id,
@@ -116,4 +119,5 @@ def gather(project_id, credentials, writer):
                     resource_id=key_name,
                     resource_name=key_label,
                     raw=raw,
+                    tags=raw.get('labels'),
                 )

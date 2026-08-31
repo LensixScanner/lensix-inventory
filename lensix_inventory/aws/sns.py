@@ -26,6 +26,18 @@ def get_topic_attributes(region, arn):
     return sns.get_topic_attributes(TopicArn=arn)['Attributes']
 
 
+def get_topic_tags(region, arn):
+    """SNS tags aren't part of get_topic_attributes' response — its own
+    separate, unpaginated call (SNS caps a topic at 50 tags, so no
+    NextToken here, unlike DynamoDB/DAX's own tag calls). Returns [] on
+    failure."""
+    sns = boto3.client('sns', region_name=region)
+    try:
+        return sns.list_tags_for_resource(ResourceArn=arn).get('Tags', [])
+    except Exception:
+        return []
+
+
 def gather(region, writer):
     for topic in get_topics(region):
         arn = topic['TopicArn']
@@ -41,4 +53,5 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=name,
             raw=attrs,
+            tags=get_topic_tags(region, arn),
         )

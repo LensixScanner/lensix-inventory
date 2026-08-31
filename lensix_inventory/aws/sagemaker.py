@@ -24,6 +24,26 @@ def describe_notebook_instance(region, name):
     return client.describe_notebook_instance(NotebookInstanceName=name)
 
 
+def get_notebook_tags(region, arn):
+    """describe_notebook_instance doesn't include tags — SageMaker's own
+    separate, paginated list_tags call, keyed by ARN. Returns [] on
+    failure."""
+    client = boto3.client('sagemaker', region_name=region, config=_BOTO_CFG)
+    tags = []
+    try:
+        kwargs = {'ResourceArn': arn}
+        while True:
+            resp = client.list_tags(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            next_token = resp.get('NextToken')
+            if not next_token:
+                break
+            kwargs['NextToken'] = next_token
+    except Exception:
+        return []
+    return tags
+
+
 def gather(region, writer):
     for nb in get_notebook_instances(region):
         name = nb['NotebookInstanceName']
@@ -39,4 +59,5 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=name,
             raw=detail,
+            tags=get_notebook_tags(region, arn),
         )

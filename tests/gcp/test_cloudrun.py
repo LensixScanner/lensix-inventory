@@ -6,14 +6,16 @@ import lensix_inventory.gcp.cloudrun as m
 
 
 def _service(*, name='checkout-api', region='us-central1', annotations=None,
-             template_annotations=None, service_account='', ingress='all'):
+             template_annotations=None, service_account='', ingress='all', extra_labels=None):
     md_annotations = {'run.googleapis.com/ingress': ingress}
     if annotations is not None:
         md_annotations = annotations
+    labels = {'cloud.googleapis.com/location': region}
+    labels.update(extra_labels or {})
     return {
         'metadata': {
             'name': name,
-            'labels': {'cloud.googleapis.com/location': region},
+            'labels': labels,
             'annotations': md_annotations,
         },
         'spec': {
@@ -131,6 +133,16 @@ class TestGather:
             m.gather('my-proj', MagicMock(), writer)
         assert writer.add_resource.call_count == 2
         assert writer.add_error.call_count == 1
+
+    def test_tags_are_passed_through_from_labels_alongside_the_system_location_label(self):
+        svc = _service(name='checkout-api', region='us-east1', extra_labels={'lensix-suppress': 'true'})
+        run = _run_client([svc])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=run):
+            m.gather('my-proj', MagicMock(), writer)
+        tags = writer.add_resource.call_args.kwargs['tags']
+        assert tags['lensix-suppress'] == 'true'
+        assert tags['cloud.googleapis.com/location'] == 'us-east1'
 
     def test_no_services_adds_nothing(self):
         run = _run_client([])

@@ -32,4 +32,5 @@ def gather(region, writer):
             resource_id=fs['FileSystemId'],
             resource_name=_fs_name(fs),
             raw=fs,
+            tags=fs.get('Tags'),
         )

@@ -56,6 +56,12 @@ def get_subnets(compute, project_id):
 
 
 def gather(project_id, credentials, writer):
+    # No tags= anywhere in this module: none of Firewall, Network, or
+    # Subnetwork have a `labels` field in the Compute Engine v1 API at
+    # all — confirmed against the real discovery document schema, not
+    # assumed (unlike most GCE resource types — Instance/Disk/Image/
+    # Address among others — which do support labels). A genuine
+    # architectural N/A, same class as kms.py's own KeyRing.
     compute = discovery.build('compute', 'v1', credentials=credentials)
 
     try:

@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.sagemaker as m
 
 
-def _sm_client(notebooks, detail_by_name=None, detail_error_names=None):
+def _sm_client(notebooks, detail_by_name=None, detail_error_names=None, tags_by_arn=None):
+    # list_tags needs an explicit, real {'Tags': [...]} response with no
+    # 'NextToken' key — an unconfigured MagicMock's own .get('NextToken')
+    # is always truthy, which would make get_notebook_tags()'s own
+    # pagination loop spin forever (same trap noted in test_dynamodb.py's
+    # own _client()).
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'NotebookInstances': notebooks}]
     detail_by_name = detail_by_name or {}
@@ -16,6 +21,8 @@ def _sm_client(notebooks, detail_by_name=None, detail_error_names=None):
             raise RuntimeError('boom')
         return detail_by_name[NotebookInstanceName]
     client.describe_notebook_instance.side_effect = _describe
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags.side_effect = lambda ResourceArn, **kw: {'Tags': tags_by_arn.get(ResourceArn, [])}
     return client
 
 
@@ -30,8 +37,18 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='sagemaker_notebook', region='us-east-1',
             resource_id='arn:aws:sagemaker:us-east-1:1:notebook-instance/nb1',
-            resource_name='nb1', raw=detail,
+            resource_name='nb1', raw=detail, tags=[],
         )
+
+    def test_notebook_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        arn = 'arn:1'
+        summary = {'NotebookInstanceName': 'nb1', 'NotebookInstanceArn': arn}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _sm_client([summary], detail_by_name={'nb1': {}}, tags_by_arn={arn: tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_a_describe_failure_for_one_notebook_does_not_abort_the_others(self):
         w = MagicMock()

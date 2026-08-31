@@ -17,11 +17,13 @@ def get_namespaces(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for ns in get_namespaces(credential, subscription_id):
+        raw = _as_dict(ns)
         writer.add_resource(
             resource_type='eventhub_namespace',
             region=ns.location or 'global',
             resource_id=ns.id,
             resource_name=ns.name,
             scope_id=_resource_group(ns.id),
-            raw=_as_dict(ns),
+            raw=raw,
+            tags=raw.get('tags'),
         )

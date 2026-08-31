@@ -96,6 +96,12 @@ def gather(project_id, credentials, writer):
     crm = discovery.build('cloudresourcemanager', 'v1', credentials=credentials)
     storage_api = discovery.build('storage', 'v1', credentials=credentials)
 
+    # No tags= on log_bucket/log_sink/log_based_metric: none of LogBucket,
+    # LogSink, or LogMetric have a `labels` field in the Cloud Logging API
+    # — LogMetric's own `labelExtractors` is a same-named-adjacent but
+    # unrelated concept (per-metric dimension extraction, not a
+    # resource-level tags map) — a genuine architectural N/A, same class
+    # as kms.py's own KeyRing.
     try:
         for bucket in get_log_buckets(logging_api, project_id):
             name = bucket.get('name', '')
@@ -150,12 +156,18 @@ def gather(project_id, credentials, writer):
                 resource_id=name,
                 resource_name=policy.get('displayName', name.split('/')[-1]),
                 raw=policy,
+                # AlertPolicy's tags-equivalent field is named `userLabels`,
+                # not `labels` — the one GCP resource type in this tool
+                # that uses that name.
+                tags=policy.get('userLabels'),
             )
     except Exception as e:
         writer.add_error(region='global', source='alert_policy', message=e)
 
     # --- Project IAM policy (audit configs) — reused from iam.py's own
-    # get_iam_policy(), same resource shape its own gather() produces. ---
+    # get_iam_policy(), same resource shape its own gather() produces.
+    # No tags= here either — see iam.py's own gather() docstring: Policy
+    # has no `labels` field at all. ---
     try:
         policy = get_iam_policy(crm, project_id)
         writer.add_resource(

@@ -110,6 +110,63 @@ export LENSIX_REGIONS=us-east-1
 An explicit `--regions` flag always wins if you pass both. Azure and GCP
 inventories aren't region-scoped, so this option only applies to AWS.
 
+## Suppressing resources with tags
+
+You can tell Lensix to ignore a resource — or just ignore one specific
+check on it — by tagging (AWS/Azure) or labeling (GCP) the resource
+itself, in your own cloud account. No action in the Lensix dashboard
+needed; this is entirely under your control, on your side.
+
+**Suppress a resource entirely** — it's excluded right here, before the
+inventory file is even written. It never reaches the output file, never
+gets uploaded, and Lensix never sees it existed:
+
+| Provider | Key | Value |
+|---|---|---|
+| AWS | `lensix-suppress` | `true` |
+| Azure | `lensix-suppress` | `true` |
+| GCP | `lensix-suppress` | `true` |
+
+**Suppress specific checks on a resource** — the resource itself is
+still gathered and uploaded normally (so it still shows up in your
+Inventory pages), but the named check(s) are skipped for it and never
+produce a finding:
+
+| Provider | Key | Value |
+|---|---|---|
+| AWS | `lensix-suppress-checks` | `ec2_deletion_protection` |
+| Azure | `lensix-suppress-checks` | `ec2_deletion_protection` |
+| GCP | `lensix-suppress-checks` | `ec2_deletion_protection` |
+
+To suppress more than one check on the same resource, separate check IDs
+with a hyphen — **not** a comma (GCP label values can't contain commas,
+so this convention is kept identical across all three providers):
+
+```
+lensix-suppress-checks = ec2_deletion_protection-ec2_public_ip
+```
+
+Check IDs are the same ones shown throughout the Lensix dashboard (e.g.
+on a finding's detail page, or in the Findings table's Check column).
+`lensix-suppress` takes exactly the value `true` (case-insensitive) —
+anything else (`false`, `yes`, empty, a typo) is treated as not set.
+
+A couple of things worth knowing:
+
+- **This only works for resource types this tool tags-checks on** — not
+  every gathered resource type reads its own tags yet. If tagging a
+  resource doesn't seem to have an effect, that resource type may not be
+  wired up for it yet.
+- **Full suppression is invisible to Lensix's Suppressions page** for
+  this reason: the resource never arrives, so there's nothing for Lensix
+  to show a record of. Per-check suppression on a resource that *did*
+  arrive does show up there (tagged "from tag" / `source: tag`), so you
+  can always see what's currently being skipped and why, alongside
+  anything suppressed manually in the dashboard.
+- Removing the tag (or changing `lensix-suppress` to anything other than
+  `true`) takes effect on your very next run — the resource, or the
+  check, is evaluated normally again from then on.
+
 ## Automated (Docker)
 
 Paid Lensix customers can run this tool unattended, on their own schedule

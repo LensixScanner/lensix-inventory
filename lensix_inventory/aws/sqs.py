@@ -27,6 +27,18 @@ def get_queue_attributes(region, url):
     return sqs.get_queue_attributes(QueueUrl=url, AttributeNames=['All'])['Attributes']
 
 
+def get_queue_tags(region, url):
+    """SQS tags aren't part of get_queue_attributes' response — its own
+    separate call, and (unlike most AWS tag APIs) already returns a flat
+    {key: value} dict rather than a list of {'Key','Value'} pairs.
+    Returns {} on failure."""
+    sqs = boto3.client('sqs', region_name=region)
+    try:
+        return sqs.list_queue_tags(QueueUrl=url).get('Tags', {})
+    except Exception:
+        return {}
+
+
 def gather(region, writer):
     for url in get_queues(region):
         name = url.split('/')[-1]
@@ -42,4 +54,5 @@ def gather(region, writer):
             resource_id=attrs.get('QueueArn', url),
             resource_name=name,
             raw=attrs,
+            tags=get_queue_tags(region, url),
         )

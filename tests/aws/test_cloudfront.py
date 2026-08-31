@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.cloudfront as m
 
 
-def _cf_client(dists, config_by_id=None, config_error_ids=None):
+def _cf_client(dists, config_by_id=None, config_error_ids=None, tags_by_arn=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'DistributionList': {'Items': dists}}]
     config_by_id = config_by_id or {}
@@ -16,6 +16,8 @@ def _cf_client(dists, config_by_id=None, config_error_ids=None):
             raise RuntimeError('boom')
         return {'Distribution': {'DistributionConfig': config_by_id[Id]}}
     client.get_distribution.side_effect = _get_dist
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags_for_resource.side_effect = lambda Resource: {'Tags': {'Items': tags_by_arn.get(Resource, [])}}
     return client
 
 
@@ -35,6 +37,15 @@ class TestGather:
         assert kwargs['resource_name'] == 'd123.cloudfront.net'
         assert kwargs['raw']['_DistributionConfig'] == config
         assert kwargs['raw']['Id'] == 'E123'
+
+    def test_distribution_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net', 'ARN': 'arn:aws:cloudfront::1:distribution/E123'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _cf_client([dist], config_by_id={'E123': {}}, tags_by_arn={'arn:aws:cloudfront::1:distribution/E123': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_falls_back_to_the_id_when_domain_name_missing(self):
         w = MagicMock()

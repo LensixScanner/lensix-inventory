@@ -138,6 +138,33 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['ebs_ami'].kwargs['resource_id'] == 'ami-1'
 
+    def test_volume_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        vol = {'VolumeId': 'vol-1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(volumes=[vol])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ebs_volume'].kwargs['tags'] == vol['Tags']
+
+    def test_snapshot_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        snap = {'SnapshotId': 'snap-1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(snapshots=[snap])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ebs_snapshot'].kwargs['tags'] == snap['Tags']
+
+    def test_ami_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        ami = {'ImageId': 'ami-1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _client(amis=[ami])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['ebs_ami'].kwargs['tags'] == ami['Tags']
+
     def test_an_amis_failure_does_not_prevent_the_others_from_being_gathered(self):
         w = MagicMock()
         vol = {'VolumeId': 'vol-1'}

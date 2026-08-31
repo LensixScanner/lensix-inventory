@@ -48,11 +48,22 @@ def gather(project_id, credentials, writer):
             resource_name=cluster_name,
             scope_id=_util.extract_network_name(cluster.get('network')),
             raw=cluster,
+            # GKE's tags-equivalent field is resourceLabels, not a
+            # top-level `labels` key — same userLabels-style naming quirk
+            # as Cloud SQL/Cloud Monitoring (see sql.py/logging.py).
+            tags=cluster.get('resourceLabels'),
         )
 
         for pool in cluster.get('nodePools', []):
             pool_name = pool.get('name', '')
             full_pool_name = f'{cluster_name}/{pool_name}'
+            # No tags= here: a NodePool has no resource-level labels field
+            # of its own — its config.labels are Kubernetes node labels
+            # applied to the underlying VMs for workload scheduling, a
+            # different concept from the GCP resource-tagging convention
+            # this tool otherwise relies on (same distinction as GCE
+            # instance metadata vs. resource labels) — a genuine
+            # architectural N/A, not an oversight.
             writer.add_resource(
                 resource_type='gke_node_pool',
                 region=location,

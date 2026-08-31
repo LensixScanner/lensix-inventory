@@ -38,6 +38,21 @@ condition check, plus the credential report's root row (a stateful
 generate-then-poll workflow, but still just a listing of existing
 account state) — is gathered here as raw resource data for Lensix to
 evaluate server-side.
+
+Tag/label support (for tag-based suppression) is wired per resource type
+based on what AWS actually supports tagging:
+  - Inline already: iam_role, iam_policy, iam_virtual_mfa_device,
+    guardduty_detector, access_analyzer.
+  - A separate tag-fetch call: sso_instance/sso_permission_set (shared
+    get_sso_tags helper), kms_key, cloudtrail_trail, eventbridge_rule,
+    config_aggregator, cloudwatch_log_group.
+  - Genuinely not taggable in AWS — no tags= passed at all:
+    iam_group, iam_server_certificate (neither has a tagging API),
+    config_recorder/config_delivery_channel/cloudwatch_metric_filter
+    (none of these three are independently taggable AWS resources), and
+    the synthetic single-record types with no real underlying resource to
+    tag (iam_password_policy, iam_account_summary, iam_root,
+    xray_encryption_config).
 """
 
 import csv
@@ -179,6 +194,27 @@ def get_sso_permission_sets(instance_arn):
     return permission_sets
 
 
+def get_sso_tags(instance_arn, resource_arn):
+    """Generic across both sso_instance and sso_permission_set — Identity
+    Center's own ListTagsForResource always takes the instance ARN plus
+    whichever resource's ARN you're asking about (the instance's own ARN
+    for itself). Returns [] on failure."""
+    sso = boto3.client('sso-admin', region_name='us-east-1')
+    tags = []
+    try:
+        kwargs = {'InstanceArn': instance_arn, 'ResourceArn': resource_arn}
+        while True:
+            resp = sso.list_tags_for_resource(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            next_token = resp.get('NextToken')
+            if not next_token:
+                break
+            kwargs['NextToken'] = next_token
+    except Exception:
+        return []
+    return tags
+
+
 # --- Regional fetchers ---
 
 def get_kms_keys(region):
@@ -215,6 +251,24 @@ def get_kms_keys(region):
     return out
 
 
+def get_kms_key_tags(region, key_id):
+    """describe_key doesn't include tags — KMS's own paginated
+    list_resource_tags call. Returns [] on failure."""
+    kms = boto3.client('kms', region_name=region)
+    tags = []
+    try:
+        kwargs = {'KeyId': key_id}
+        while True:
+            resp = kms.list_resource_tags(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            if not resp.get('Truncated'):
+                break
+            kwargs['Marker'] = resp.get('NextMarker')
+    except Exception:
+        return []
+    return tags
+
+
 def get_cloudtrail_trails(region):
     """describe_trails, merged per trail with event selectors, trail
     status, and (for the trail's own S3 bucket) bucket logging/policy/
@@ -246,6 +300,21 @@ def get_cloudtrail_trails(region):
             trail['_BucketPolicy'] = policy_doc
             trail['_BucketPublicAccessBlock'] = _try(s3.get_public_access_block, Bucket=bucket)
     return trails
+
+
+def get_trail_tags(region, trail_arn):
+    """describe_trails doesn't include tags — CloudTrail's own ListTags
+    call (batched by design, but called one ARN at a time here to keep
+    the per-trail failure isolated). Returns [] on failure."""
+    ct = boto3.client('cloudtrail', region_name=region)
+    try:
+        resp = ct.list_tags(ResourceIdList=[trail_arn])
+        for entry in resp.get('ResourceTagList', []):
+            if entry.get('ResourceId') == trail_arn:
+                return entry.get('TagsList', [])
+        return []
+    except Exception:
+        return []
 
 
 def get_config_recorders(region):
@@ -281,6 +350,25 @@ def get_config_aggregators(region):
         return cfg.describe_configuration_aggregators().get('ConfigurationAggregators', [])
     except Exception:
         return []
+
+
+def get_config_aggregator_tags(region, arn):
+    """describe_configuration_aggregators doesn't include tags — Config's
+    own paginated list_tags_for_resource call. Returns [] on failure."""
+    cfg = boto3.client('config', region_name=region)
+    tags = []
+    try:
+        kwargs = {'ResourceArn': arn}
+        while True:
+            resp = cfg.list_tags_for_resource(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            next_token = resp.get('NextToken')
+            if not next_token:
+                break
+            kwargs['NextToken'] = next_token
+    except Exception:
+        return []
+    return tags
 
 
 def get_guardduty_detectors(region):
@@ -322,6 +410,19 @@ def get_log_groups(region):
     except Exception:
         pass
     return groups
+
+
+def get_log_group_tags(region, log_group_arn):
+    """describe_log_groups doesn't include tags — Logs' own
+    list_tags_for_resource call (unpaginated; log groups have supported
+    the newer ARN-keyed tagging API since 2021 — list_tags_log_group is
+    the older, name-keyed equivalent, not needed here). Returns {} on
+    failure."""
+    logs = boto3.client('logs', region_name=region)
+    try:
+        return logs.list_tags_for_resource(resourceArn=log_group_arn).get('tags', {})
+    except Exception:
+        return {}
 
 
 def get_xray_encryption_config(region):
@@ -381,6 +482,16 @@ def get_eventbridge_rules(region):
     return rules
 
 
+def get_eventbridge_rule_tags(region, rule_arn):
+    """list_rules doesn't include tags — EventBridge's own (unpaginated)
+    list_tags_for_resource call. Returns [] on failure."""
+    events = boto3.client('events', region_name=region)
+    try:
+        return events.list_tags_for_resource(ResourceARN=rule_arn).get('Tags', [])
+    except Exception:
+        return []
+
+
 def get_root_credential_report_row():
     """Same generate-then-poll workflow as user.py's own
     get_credential_report() (duplicated rather than shared — this module
@@ -434,7 +545,7 @@ def gather_global(writer, account_id, regions=None):
     for role in roles:
         writer.add_resource(
             resource_type='iam_role', region='global', resource_id=role['RoleId'],
-            resource_name=role['RoleName'], raw=role,
+            resource_name=role['RoleName'], raw=role, tags=role.get('Tags'),
         )
 
     try:
@@ -456,7 +567,7 @@ def gather_global(writer, account_id, regions=None):
     for policy in policies:
         writer.add_resource(
             resource_type='iam_policy', region='global', resource_id=policy['Arn'],
-            resource_name=policy['PolicyName'], raw=policy,
+            resource_name=policy['PolicyName'], raw=policy, tags=policy.get('Tags'),
         )
 
     try:
@@ -480,7 +591,7 @@ def gather_global(writer, account_id, regions=None):
         serial = device['SerialNumber']
         writer.add_resource(
             resource_type='iam_virtual_mfa_device', region='global', resource_id=serial,
-            resource_name=serial, raw=device,
+            resource_name=serial, raw=device, tags=device.get('Tags'),
         )
 
     try:
@@ -517,6 +628,7 @@ def gather_global(writer, account_id, regions=None):
         writer.add_resource(
             resource_type='sso_instance', region='global', resource_id=instance_arn,
             resource_name=instance.get('IdentityStoreId', instance_arn), raw=instance,
+            tags=get_sso_tags(instance_arn, instance_arn) if instance_arn else None,
         )
         if instance_arn:
             try:
@@ -529,6 +641,7 @@ def gather_global(writer, account_id, regions=None):
                 writer.add_resource(
                     resource_type='sso_permission_set', region='global', resource_id=ps_arn,
                     resource_name=ps.get('Name', ps_arn), scope_id=instance_arn, raw=ps,
+                    tags=get_sso_tags(instance_arn, ps_arn) if ps_arn else None,
                 )
 
     try:
@@ -560,9 +673,11 @@ def gather_global(writer, account_id, regions=None):
         try:
             for rule in get_eventbridge_rules(region):
                 name = rule.get('Name', region)
+                rule_arn = rule.get('Arn')
                 writer.add_resource(
                     resource_type='eventbridge_rule', region=region, resource_id=name,
                     resource_name=name, raw=rule,
+                    tags=get_eventbridge_rule_tags(region, rule_arn) if rule_arn else None,
                 )
         except Exception as e:
             writer.add_error(region=region, source='account (eventbridge rules, root-usage coverage)', message=e)
@@ -590,7 +705,7 @@ def gather(region, writer):
             break
         writer.add_resource(
             resource_type='kms_key', region=region, resource_id=key_id,
-            resource_name=name, raw=key,
+            resource_name=name, raw=key, tags=get_kms_key_tags(region, key_id),
         )
 
     try:
@@ -603,6 +718,7 @@ def gather(region, writer):
         writer.add_resource(
             resource_type='cloudtrail_trail', region=region, resource_id=arn,
             resource_name=trail.get('Name', arn), raw=trail,
+            tags=get_trail_tags(region, arn) if arn else None,
         )
 
     # Alarm coverage — metric filters (with their alarms resolved) for
@@ -624,9 +740,11 @@ def gather(region, writer):
     try:
         for rule in get_eventbridge_rules(region):
             name = rule.get('Name', region)
+            rule_arn = rule.get('Arn')
             writer.add_resource(
                 resource_type='eventbridge_rule', region=region, resource_id=name,
                 resource_name=name, raw=rule,
+                tags=get_eventbridge_rule_tags(region, rule_arn) if rule_arn else None,
             )
     except Exception as e:
         writer.add_error(region=region, source='account (eventbridge rules)', message=e)
@@ -662,9 +780,11 @@ def gather(region, writer):
         aggregators = []
     for agg in aggregators:
         name = agg.get('ConfigurationAggregatorName', region)
+        agg_arn = agg.get('ConfigurationAggregatorArn')
         writer.add_resource(
             resource_type='config_aggregator', region=region, resource_id=name,
             resource_name=name, raw=agg,
+            tags=get_config_aggregator_tags(region, agg_arn) if agg_arn else None,
         )
 
     try:
@@ -676,7 +796,7 @@ def gather(region, writer):
         detector_id = detector['DetectorId']
         writer.add_resource(
             resource_type='guardduty_detector', region=region, resource_id=detector_id,
-            resource_name=detector_id, raw=detector,
+            resource_name=detector_id, raw=detector, tags=detector.get('Tags'),
         )
 
     try:
@@ -688,7 +808,7 @@ def gather(region, writer):
         arn = analyzer.get('arn')
         writer.add_resource(
             resource_type='access_analyzer', region=region, resource_id=arn,
-            resource_name=analyzer.get('name', arn), raw=analyzer,
+            resource_name=analyzer.get('name', arn), raw=analyzer, tags=analyzer.get('tags'),
         )
 
     try:
@@ -698,9 +818,11 @@ def gather(region, writer):
         log_groups = []
     for lg in log_groups:
         name = lg.get('logGroupName')
+        arn = lg.get('arn') or lg.get('logGroupArn')
         writer.add_resource(
             resource_type='cloudwatch_log_group', region=region, resource_id=name,
             resource_name=name, raw=lg,
+            tags=get_log_group_tags(region, arn) if arn else None,
         )
 
     try:

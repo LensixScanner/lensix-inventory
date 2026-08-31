@@ -16,11 +16,13 @@ def get_registries(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for registry in get_registries(credential, subscription_id):
+        raw = _as_dict(registry)
         writer.add_resource(
             resource_type='container_registry',
             region=registry.location or 'global',
             resource_id=registry.id,
             resource_name=registry.name,
             scope_id=_resource_group(registry.id),
-            raw=_as_dict(registry),
+            raw=raw,
+            tags=raw.get('tags'),
         )

@@ -49,4 +49,7 @@ def gather(region, writer):
             resource_id=arn,
             resource_name=name,
             raw=cluster,
+            # MSK's own Tags field is already a flat {key: value} map, not
+            # a list of {'Key','Value'} pairs — no extra call needed.
+            tags=cluster.get('Tags'),
         )

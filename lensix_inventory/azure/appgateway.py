@@ -17,11 +17,13 @@ def get_gateways(credential, subscription_id):
 
 def gather(credential, subscription_id, writer):
     for gw in get_gateways(credential, subscription_id):
+        raw = _as_dict(gw)
         writer.add_resource(
             resource_type='application_gateway',
             region=gw.location or 'global',
             resource_id=gw.id,
             resource_name=gw.name,
             scope_id=_resource_group(gw.id),
-            raw=_as_dict(gw),
+            raw=raw,
+            tags=raw.get('tags'),
         )

@@ -48,6 +48,19 @@ def get_functions(region):
     return functions
 
 
+def get_function_tags(region, function_arn):
+    """Lambda tags aren't included in list_functions()'s own response —
+    they need a separate call, keyed by the function's ARN (not its
+    name). Returns a flat {key: value} dict (Lambda's ListTags already
+    returns that shape, unlike most other AWS tag APIs), or {} on
+    failure — no tags is not worth failing gather() over."""
+    lambda_client = boto3.client('lambda', region_name=region)
+    try:
+        return lambda_client.list_tags(Resource=function_arn).get('Tags', {})
+    except Exception:
+        return {}
+
+
 def get_resource_policy(region, function_name):
     lambda_client = boto3.client('lambda', region_name=region)
     try:
@@ -184,4 +197,5 @@ def gather(region, writer):
             scope_id=vpc_id,
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=get_function_tags(region, fn['FunctionArn']),
         )

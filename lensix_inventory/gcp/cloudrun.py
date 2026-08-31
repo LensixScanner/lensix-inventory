@@ -66,4 +66,5 @@ def gather(project_id, credentials, writer):
             resource_id=service_name,
             resource_name=name,
             raw=raw,
+            tags=metadata.get('labels'),
         )

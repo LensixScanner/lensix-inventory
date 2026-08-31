@@ -63,6 +63,7 @@ def gather(credential, subscription_id, writer):
         raw = server.as_dict()
         raw['_SecurityAlertPolicy'] = get_security_alert_policy(credential, subscription_id, rg, server.name)
         raw['_AuditingPolicy'] = get_auditing_policy(credential, subscription_id, rg, server.name)
+        server_tags = raw.get('tags')
         writer.add_resource(
             resource_type='sql_server',
             region=region,
@@ -70,6 +71,7 @@ def gather(credential, subscription_id, writer):
             resource_name=server.name,
             scope_id=rg,
             raw=raw,
+            tags=server_tags,
         )
 
         try:
@@ -79,6 +81,9 @@ def gather(credential, subscription_id, writer):
             continue
 
         for rule in rules:
+            # FirewallRule has no `tags` field of its own (the SDK model
+            # rejects it entirely) — it inherits the parent server's own
+            # tags instead, same pattern as azure.network's vnet_peering.
             writer.add_resource(
                 resource_type='sql_server_firewall_rule',
                 region=region,
@@ -86,4 +91,5 @@ def gather(credential, subscription_id, writer):
                 resource_name=rule.name,
                 scope_id=rg,
                 raw=rule.as_dict(),
+                tags=server_tags,
             )

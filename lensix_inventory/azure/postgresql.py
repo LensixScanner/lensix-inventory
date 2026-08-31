@@ -102,6 +102,7 @@ def gather(credential, subscription_id, writer):
             resource_name=server.name,
             scope_id=rg,
             raw=raw,
+            tags=raw.get('tags'),
         )
 
     try:
@@ -123,4 +124,5 @@ def gather(credential, subscription_id, writer):
             resource_name=server.name,
             scope_id=rg,
             raw=raw,
+            tags=raw.get('tags'),
         )

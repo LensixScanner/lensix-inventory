@@ -33,6 +33,45 @@ def get_continuous_backups(region, name):
         return None
 
 
+def get_table_tags(region, table_arn):
+    """DynamoDB tags aren't in describe_table's response — a separate,
+    paginated list_tags_of_resource call, keyed by ARN. Returns the raw
+    Tags list ([{'Key','Value'}, ...]), or [] on failure."""
+    ddb = boto3.client('dynamodb', region_name=region)
+    tags = []
+    try:
+        kwargs = {'ResourceArn': table_arn}
+        while True:
+            resp = ddb.list_tags_of_resource(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            token = resp.get('NextToken')
+            if not token:
+                break
+            kwargs['NextToken'] = token
+    except Exception:
+        return []
+    return tags
+
+
+def get_dax_cluster_tags(region, cluster_arn):
+    """DAX tags likewise aren't in describe_clusters' response — its own
+    separate, paginated list_tags call, keyed by ARN."""
+    dax = boto3.client('dax', region_name=region)
+    tags = []
+    try:
+        kwargs = {'ResourceName': cluster_arn}
+        while True:
+            resp = dax.list_tags(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            token = resp.get('NextToken')
+            if not token:
+                break
+            kwargs['NextToken'] = token
+    except Exception:
+        return []
+    return tags
+
+
 def get_dax_clusters(region):
     dax = boto3.client('dax', region_name=region)
     clusters = []
@@ -59,24 +98,28 @@ def gather(region, writer):
                 writer.add_error(region=region, source=f'dynamodb_table:{name}', message=e)
                 continue
             table['_ContinuousBackups'] = get_continuous_backups(region, name)
+            table_arn = table.get('TableArn', name)
             writer.add_resource(
                 resource_type='dynamodb_table',
                 region=region,
-                resource_id=table.get('TableArn', name),
+                resource_id=table_arn,
                 resource_name=name,
                 raw=table,
+                tags=get_table_tags(region, table_arn),
             )
     except Exception as e:
         writer.add_error(region=region, source='dynamodb (tables)', message=e)
 
     try:
         for cluster in get_dax_clusters(region):
+            cluster_arn = cluster.get('ClusterArn', cluster.get('ClusterName', ''))
             writer.add_resource(
                 resource_type='dax_cluster',
                 region=region,
-                resource_id=cluster.get('ClusterArn', cluster.get('ClusterName', '')),
+                resource_id=cluster_arn,
                 resource_name=cluster.get('ClusterName', ''),
                 raw=cluster,
+                tags=get_dax_cluster_tags(region, cluster_arn),
             )
     except Exception as e:
         writer.add_error(region=region, source='dynamodb (dax clusters)', message=e)

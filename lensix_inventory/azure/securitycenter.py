@@ -23,6 +23,10 @@ def get_auto_provisioning_settings(credential, subscription_id):
 
 
 def gather(credential, subscription_id, writer):
+    # No tags= on either resource type gathered here: SecurityContact and
+    # AutoProvisioningSetting are both control-plane objects with no
+    # `tags` field on their own SDK models — same architectural N/A as
+    # authorization.py's role_definition (see that module's own comment).
     try:
         contacts = get_security_contacts(credential, subscription_id)
     except Exception as e:

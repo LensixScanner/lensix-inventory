@@ -36,5 +36,13 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once_with(
             resource_type='secretsmanager_secret', region='us-east-1',
-            resource_id='arn:aws:secretsmanager:us-east-1:1:secret:s1', resource_name='s1', raw=secret,
+            resource_id='arn:aws:secretsmanager:us-east-1:1:secret:s1', resource_name='s1', raw=secret, tags=None,
         )
+
+    def test_secret_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        secret = {'ARN': 'arn:1', 'Name': 's1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _sm_client([{'SecretList': [secret]}])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == secret['Tags']

@@ -37,4 +37,6 @@ def gather(region, writer):
             resource_id=secret['ARN'],
             resource_name=secret['Name'],
             raw=secret,
+            # list_secrets already includes each secret's own Tags inline.
+            tags=secret.get('Tags'),
         )

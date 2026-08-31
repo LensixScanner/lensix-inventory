@@ -42,6 +42,14 @@ class TestGather:
         assert kwargs['resource_name'] == 'analytics'
         assert kwargs['raw']['_SecurityConfig'] is None
 
+    def test_cluster_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        cluster = {'Id': 'j-1', 'Name': 'analytics', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _emr_client([{'Id': 'j-1'}], detail_by_id={'j-1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == cluster['Tags']
+
     def test_a_named_security_config_is_merged_in(self):
         w = MagicMock()
         cluster = {'Id': 'j-1', 'Name': 'analytics', 'SecurityConfiguration': 'sc-1'}

@@ -14,7 +14,8 @@ def _clients(classic_lbs=None, classic_attrs=None, classic_health=None, classic_
              listeners_by_arn=None, target_groups_by_arn=None,
              tg_attrs_by_arn=None, target_health_by_arn=None,
              web_acl_by_arn=None, web_acl_not_found_arns=None,
-             all_target_groups=None, all_target_groups_raise=False):
+             all_target_groups=None, all_target_groups_raise=False,
+             classic_tags_by_name=None, elbv2_tags_by_arn=None):
     elb = MagicMock()
     if classic_raise:
         elb.get_paginator.return_value.paginate.side_effect = RuntimeError('boom')
@@ -22,6 +23,10 @@ def _clients(classic_lbs=None, classic_attrs=None, classic_health=None, classic_
         elb.get_paginator.return_value.paginate.return_value = [{'LoadBalancerDescriptions': classic_lbs or []}]
     elb.describe_load_balancer_attributes.return_value = {'LoadBalancerAttributes': classic_attrs or {}}
     elb.describe_instance_health.return_value = {'InstanceStates': classic_health or []}
+    classic_tags_by_name = classic_tags_by_name or {}
+    elb.describe_tags.side_effect = lambda LoadBalancerNames: {
+        'TagDescriptions': [{'LoadBalancerName': n, 'Tags': classic_tags_by_name.get(n, [])} for n in LoadBalancerNames]
+    }
 
     elbv2 = MagicMock()
 
@@ -57,6 +62,10 @@ def _clients(classic_lbs=None, classic_attrs=None, classic_health=None, classic_
     target_health_by_arn = target_health_by_arn or {}
     elbv2.describe_target_health.side_effect = lambda TargetGroupArn: {
         'TargetHealthDescriptions': target_health_by_arn.get(TargetGroupArn, [])
+    }
+    elbv2_tags_by_arn = elbv2_tags_by_arn or {}
+    elbv2.describe_tags.side_effect = lambda ResourceArns: {
+        'TagDescriptions': [{'ResourceArn': a, 'Tags': elbv2_tags_by_arn.get(a, [])} for a in ResourceArns]
     }
 
     wafv2 = MagicMock()
@@ -99,6 +108,16 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['classic_load_balancer'].kwargs['raw']['_InstanceHealth'] == []
 
+    def test_classic_lb_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        classic_lb = {'LoadBalancerName': 'clb-1'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client_fn = _clients(classic_lbs=[classic_lb], classic_tags_by_name={'clb-1': tags})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['classic_load_balancer'].kwargs['tags'] == tags
+
     def test_a_classic_lbs_failure_does_not_prevent_modern_lbs_from_being_gathered(self):
         w = MagicMock()
         modern_lb = {'LoadBalancerName': 'alb-1', 'LoadBalancerArn': 'arn:alb-1', 'Type': 'network'}
@@ -133,6 +152,26 @@ class TestGather:
         assert tg_record['_Attributes'] == {'deregistration_delay.timeout_seconds': '300'}
         assert tg_record['_TargetHealthDescriptions'] == [{'Target': {'Id': 'i-1'}}]
         assert '_WebACL' not in lb_call.kwargs['raw']
+
+    def test_modern_lb_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        modern_lb = {'LoadBalancerName': 'nlb-1', 'LoadBalancerArn': 'arn:nlb-1', 'Type': 'network'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client_fn = _clients(modern_lbs=[modern_lb], elbv2_tags_by_arn={'arn:nlb-1': tags})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['load_balancer'].kwargs['tags'] == tags
+
+    def test_target_group_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        tg = {'TargetGroupArn': 'arn:tg-1', 'TargetGroupName': 'tg-1'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client_fn = _clients(all_target_groups=[tg], elbv2_tags_by_arn={'arn:tg-1': tags})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['target_group'].kwargs['tags'] == tags
 
     def test_an_application_lb_gets_a_web_acl_lookup(self):
         w = MagicMock()

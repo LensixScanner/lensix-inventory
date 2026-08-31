@@ -60,6 +60,14 @@ def gather(project_id, credentials, writer):
     iam = discovery.build('iam', 'v1', credentials=credentials)
 
     # --- Project IAM policy (bindings + audit configs) ---
+    # No tags= on any of this module's three resource types: none of
+    # Policy (getIamPolicy's own response — {version, bindings,
+    # auditConfigs, etag}), ServiceAccount, or WorkloadIdentityPoolProvider
+    # support GCP labels at all — a well-documented IAM-specific gap (only
+    # regular resources support the labels convention this tool otherwise
+    # relies on for tags=). Same architectural N/A class as Azure's
+    # authorization.py/policy.py/securitycenter.py (see
+    # docs/tag-suppressions.md).
     try:
         policy = get_iam_policy(crm, project_id)
         writer.add_resource(

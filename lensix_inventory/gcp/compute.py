@@ -239,6 +239,7 @@ def gather(project_id, credentials, writer):
             scope_id=_instance_network(inst),
             raw=raw,
             secret_scan_hits=secret_hits,
+            tags=raw.get('labels'),
         )
 
     # --- Custom images (IAM policy merged in, like aws/s3.py's per-bucket fan-out merge) ---
@@ -261,6 +262,7 @@ def gather(project_id, credentials, writer):
             resource_id=image.get('selfLink', name),
             resource_name=name,
             raw=raw,
+            tags=raw.get('labels'),
         )
 
     # --- Disk snapshots ---
@@ -277,6 +279,7 @@ def gather(project_id, credentials, writer):
             resource_id=snap.get('selfLink', snap['name']),
             resource_name=snap['name'],
             raw=snap,
+            tags=snap.get('labels'),
         )
 
     # --- Managed instance groups (matching autoscaler config merged in) ---
@@ -305,6 +308,11 @@ def gather(project_id, credentials, writer):
             raw['_InstanceTemplatePublicIp'] = None
             writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
                               message=f"{mig.get('name', '')}: {e}")
+        # No tags= here: InstanceGroupManager has no `labels` field in the
+        # Compute Engine v1 API at all (confirmed against the real
+        # discovery document schema, same check that caught vpc.py's own
+        # mistake — see docs/tag-suppressions.md) — a genuine
+        # architectural N/A, same class as kms.py's own KeyRing.
         writer.add_resource(
             resource_type='instance_group_manager',
             region=zone,
@@ -314,6 +322,11 @@ def gather(project_id, credentials, writer):
         )
 
     # --- Project-level metadata (ssh-keys, oslogin, ... — same redaction as instance metadata) ---
+    # No tags= on compute_project_metadata: it's a synthetic, project-wide
+    # singleton (the project's own commonInstanceMetadata, not a real
+    # listable resource with its own id/labels) — same architectural N/A
+    # class as AWS's account.py synthetics (iam_password_policy,
+    # iam_account_summary, ...).
     try:
         items = get_project_metadata_items(compute, project_id)
         key_names, secret_hits, relevant_values = _redact_metadata(items)

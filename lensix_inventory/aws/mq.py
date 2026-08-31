@@ -43,4 +43,6 @@ def gather(region, writer):
             resource_id=broker.get('BrokerArn', broker_id),
             resource_name=broker_name,
             raw=broker,
+            # MQ's own Tags field is already a flat {key: value} map.
+            tags=broker.get('Tags'),
         )

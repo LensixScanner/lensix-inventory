@@ -410,6 +410,7 @@ def gather(region, writer):
             resource_name=sg.get('GroupName', group_id),
             scope_id=sg.get('VpcId'),
             raw=raw,
+            tags=sg.get('Tags'),
         )
 
     # Synthetic, region-scoped singleton (same convention as account.py's

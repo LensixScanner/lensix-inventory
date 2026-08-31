@@ -54,6 +54,25 @@ def get_stream_summary(region, name):
     return resp['StreamDescriptionSummary']
 
 
+def get_stream_tags(region, name):
+    """describe_stream_summary doesn't include tags — Kinesis's own
+    separate, paginated list_tags_for_stream call. Returns [] on
+    failure."""
+    kin = boto3.client('kinesis', region_name=region)
+    tags = []
+    try:
+        kwargs = {'StreamName': name}
+        while True:
+            resp = kin.list_tags_for_stream(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            if not resp.get('HasMoreTags'):
+                break
+            kwargs['ExclusiveStartTagKey'] = tags[-1]['Key']
+    except Exception:
+        return []
+    return tags
+
+
 def get_firehose_streams(region):
     fh = boto3.client('firehose', region_name=region)
     names = []
@@ -70,6 +89,25 @@ def get_firehose_streams(region):
 def get_firehose_detail(region, name):
     fh = boto3.client('firehose', region_name=region)
     return fh.describe_delivery_stream(DeliveryStreamName=name)['DeliveryStreamDescription']
+
+
+def get_firehose_tags(region, name):
+    """describe_delivery_stream doesn't include tags either — Firehose's
+    own separate, paginated list_tags_for_delivery_stream call. Returns
+    [] on failure."""
+    fh = boto3.client('firehose', region_name=region)
+    tags = []
+    try:
+        kwargs = {'DeliveryStreamName': name}
+        while True:
+            resp = fh.list_tags_for_delivery_stream(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            if not resp.get('HasMoreTags'):
+                break
+            kwargs['ExclusiveStartTagKey'] = tags[-1]['Key']
+    except Exception:
+        return []
+    return tags
 
 
 def gather(region, writer):
@@ -98,6 +136,7 @@ def gather(region, writer):
                 resource_id=name,
                 resource_name=name,
                 raw=raw,
+                tags=get_stream_tags(region, name),
             )
     except Exception as e:
         writer.add_error(region=region, source='kinesis (data streams)', message=e)
@@ -115,6 +154,7 @@ def gather(region, writer):
                 resource_id=name,
                 resource_name=name,
                 raw=detail,
+                tags=get_firehose_tags(region, name),
             )
     except Exception as e:
         writer.add_error(region=region, source='kinesis (firehose streams)', message=e)

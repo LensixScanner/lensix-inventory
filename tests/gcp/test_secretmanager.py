@@ -5,8 +5,11 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.secretmanager as m
 
 
-def _secret(*, name='projects/p/secrets/prod-db-password'):
-    return {'name': name}
+def _secret(*, name='projects/p/secrets/prod-db-password', labels=None):
+    s = {'name': name}
+    if labels is not None:
+        s['labels'] = labels
+    return s
 
 
 def _version(*, name, state='ENABLED', create_time='2026-01-01T00:00:00Z'):
@@ -109,6 +112,14 @@ class TestGather:
         assert writer.add_error.call_count == 1
         bad_raw = [c.kwargs['raw'] for c in writer.add_resource.call_args_list if c.kwargs['resource_name'] == 'bad'][0]
         assert bad_raw['_Versions'] == []
+
+    def test_tags_are_passed_through_from_labels(self):
+        secret = _secret(name='projects/p/secrets/s1', labels={'lensix-suppress': 'true'})
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        assert writer.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_no_secrets_adds_nothing(self):
         sm = _sm_client([])

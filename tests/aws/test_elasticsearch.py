@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.elasticsearch as m
 
 
-def _es_client(names, detail_by_name=None, detail_error_names=None):
+def _es_client(names, detail_by_name=None, detail_error_names=None, tags_by_arn=None):
     client = MagicMock()
     client.list_domain_names.return_value = {'DomainNames': [{'DomainName': n} for n in names]}
     detail_by_name = detail_by_name or {}
@@ -16,6 +16,8 @@ def _es_client(names, detail_by_name=None, detail_error_names=None):
             raise RuntimeError('boom')
         return {'DomainStatus': detail_by_name[DomainName]}
     client.describe_elasticsearch_domain.side_effect = _describe
+    tags_by_arn = tags_by_arn or {}
+    client.list_tags.side_effect = lambda ARN: {'TagList': tags_by_arn.get(ARN, [])}
     return client
 
 
@@ -29,8 +31,17 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='elasticsearch_domain', region='us-east-1',
             resource_id='arn:aws:es:us-east-1:1:domain/logs', resource_name='logs',
-            scope_id='vpc-1', raw=domain,
+            scope_id='vpc-1', raw=domain, tags=[],
         )
+
+    def test_domain_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        domain = {'ARN': 'arn:1'}
+        tags = [{'Key': 'lensix-suppress', 'Value': 'true'}]
+        client = _es_client(['logs'], detail_by_name={'logs': domain}, tags_by_arn={'arn:1': tags})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == tags
 
     def test_no_vpc_options_means_no_scope_id(self):
         w = MagicMock()

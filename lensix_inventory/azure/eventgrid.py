@@ -37,4 +37,5 @@ def gather(credential, subscription_id, writer):
             resource_name=domain.name,
             scope_id=_resource_group(domain.id),
             raw=raw,
+            tags=raw.get('tags'),
         )

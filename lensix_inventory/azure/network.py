@@ -33,13 +33,16 @@ def gather(credential, subscription_id, writer):
     for vnet in vnets:
         region = vnet.location or 'global'
         rg = _resource_group(vnet.id)
+        vnet_raw = vnet.as_dict()
+        vnet_tags = vnet_raw.get('tags')
         writer.add_resource(
             resource_type='virtual_network',
             region=region,
             resource_id=vnet.id,
             resource_name=vnet.name,
             scope_id=rg,
-            raw=vnet.as_dict(),
+            raw=vnet_raw,
+            tags=vnet_tags,
         )
 
         try:
@@ -49,6 +52,12 @@ def gather(credential, subscription_id, writer):
             continue
 
         for peering in peerings:
+            # VirtualNetworkPeering has no `tags` field of its own (the SDK
+            # model rejects it entirely) — it inherits the parent VNet's own
+            # tags instead, so lensix-suppress/lensix-suppress-checks on the
+            # VNet also suppresses (fully, or just network_unknownpeering
+            # for) each of its peerings. A fully-suppressed VNet's peerings
+            # are therefore never gathered either, same as the VNet itself.
             writer.add_resource(
                 resource_type='vnet_peering',
                 region=region,
@@ -56,4 +65,5 @@ def gather(credential, subscription_id, writer):
                 resource_name=peering.name,
                 scope_id=rg,
                 raw=peering.as_dict(),
+                tags=vnet_tags,
             )

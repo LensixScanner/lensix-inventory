@@ -48,4 +48,5 @@ def gather(project_id, credentials, writer):
             resource_id=dataset_id,
             resource_name=dataset_id,
             raw=dataset,
+            tags=dataset.get('labels'),
         )

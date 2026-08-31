@@ -40,6 +40,17 @@ def get_domain_detail(domain_name):
     return client.get_domain_detail(DomainName=domain_name)
 
 
+def get_domain_tags(domain_name):
+    """get_domain_detail's own response doesn't include tags — Route 53
+    Domains' own separate list_tags_for_domain call. Returns [] on
+    failure."""
+    client = boto3.client('route53domains', region_name='us-east-1', config=_BOTO_CFG)
+    try:
+        return client.list_tags_for_domain(DomainName=domain_name).get('TagList', [])
+    except Exception:
+        return []
+
+
 # --- Hosted zones ---
 
 def get_public_zones():
@@ -57,6 +68,20 @@ def get_public_zones():
             break
         kwargs['Marker'] = marker
     return zones
+
+
+def get_zone_tags(clean_zone_id):
+    """list_hosted_zones' own response doesn't include tags — Route 53's
+    generic list_tags_for_resource call, which (unlike most tagging APIs)
+    takes the bare zone id, not the full '/hostedzone/Z123...' path or an
+    ARN. Returns [] on failure."""
+    client = boto3.client('route53', config=_BOTO_CFG)
+    try:
+        return client.list_tags_for_resource(
+            ResourceType='hostedzone', ResourceId=clean_zone_id,
+        )['ResourceTagSet'].get('Tags', [])
+    except Exception:
+        return []
 
 
 def get_apex_txt_records(zone_id, apex_name):
@@ -95,6 +120,7 @@ def gather(writer):
                 resource_id=domain,
                 resource_name=domain,
                 raw=detail,
+                tags=get_domain_tags(domain),
             )
     except Exception as e:
         writer.add_error(region='global', source='route53 (domains)', message=e)
@@ -115,6 +141,7 @@ def gather(writer):
                 resource_id=clean_id,
                 resource_name=zone_name_clean,
                 raw=raw,
+                tags=get_zone_tags(clean_id),
             )
     except Exception as e:
         writer.add_error(region='global', source='route53 (hosted zones)', message=e)

@@ -25,6 +25,11 @@ def gather(credential, subscription_id, writer):
         return
 
     for assignment in assignments:
+        # No tags= here: PolicyAssignment (Microsoft.Authorization/
+        # policyAssignments) is a control-plane object, not a
+        # taggable ARM resource — confirmed absent from its own
+        # attribute map, same architectural N/A as authorization.py's
+        # role_definition (see that module's own comment).
         writer.add_resource(
             resource_type='policy_assignment',
             region='global',

@@ -59,6 +59,95 @@ def _json_default(value):
     return str(value)
 
 
+# ── Tag-based suppression ────────────────────────────────────────────────────
+#
+# A customer can suppress a resource, or specific checks on it, entirely from
+# their own cloud account — no Lensix UI action needed — by tagging it:
+#   lensix-suppress = true                     -> the resource is excluded
+#                                                  from inventory entirely
+#                                                  (see add_resource() below;
+#                                                  it's never even recorded).
+#   lensix-suppress-checks = <check-ids>       -> the resource IS still
+#                                                  inventoried, but the listed
+#                                                  checks are skipped for it
+#                                                  (see
+#                                                  raw['_SuppressedCheckIds'],
+#                                                  read by every scanner-light
+#                                                  check-evaluation loop).
+#
+# One key convention across all three providers, not a per-provider special
+# case — chosen to be valid everywhere at once: GCP label keys/values are
+# restricted to lowercase letters, digits, underscores, and hyphens (no
+# colons, no uppercase, 63-char value limit) — the tightest of the three
+# clouds' rules, so it's the one this has to satisfy. check_ids are already
+# snake_case and never contain a hyphen themselves, which is exactly why
+# lensix-suppress-checks joins multiple check_ids with '-' rather than the
+# more obvious ',' — GCP label values can't contain a comma at all.
+#
+#   AWS (EC2-family): raw['Tags'] -> [{'Key': ..., 'Value': ...}, ...]
+#   AWS (ECS/EKS/Glue/MSK/others): raw['tags'] -> [{'key': ..., 'value': ...}, ...]
+#                                  (lowercase field names — a genuine
+#                                  AWS-internal inconsistency between
+#                                  services, not a typo)
+#   Azure: raw['tags']   -> {key: value}
+#   GCP:   raw['labels'] -> {key: value}
+# add_resource()'s own `tags` argument accepts any of these shapes
+# directly (see _normalize_tags below) — each gather() call site passes
+# whichever its own raw record actually carries, unmodified.
+
+SUPPRESS_TAG_KEY = 'lensix-suppress'
+SUPPRESS_CHECKS_TAG_KEY = 'lensix-suppress-checks'
+
+
+def _normalize_tags(tags):
+    """dict form of a resource's tags, regardless of which of the real-
+    world shapes they arrived in: AWS EC2-family's list of
+    {'Key','Value'} dicts, a handful of newer/non-EC2 AWS services'
+    list of lowercase {'key','value'} dicts instead (ECS, EKS, Glue, MSK,
+    and others — a genuine AWS-internal inconsistency, not a typo; each
+    gather call site passes its own API's raw Tag list through
+    unmodified rather than reshaping it itself), KMS's own list of
+    {'TagKey','TagValue'} dicts (yet another AWS-internal variant), or
+    Azure/GCP's already-flat {key: value} dict. None/empty input (a
+    resource with no tags/labels at all, or one an older gather call site
+    hasn't been updated to pass tags= for yet) returns {}."""
+    if not tags:
+        return {}
+    if isinstance(tags, dict):
+        return tags
+
+    def _key(t):
+        for field in ('Key', 'key', 'TagKey'):
+            if t.get(field) is not None:
+                return t[field]
+        return None
+
+    def _value(t):
+        for field in ('Value', 'value', 'TagValue'):
+            if field in t:
+                return t[field]
+        return None
+
+    return {_key(t): _value(t) for t in tags if _key(t) is not None}
+
+
+def parse_tag_suppression(tags):
+    """(full_suppress: bool, suppressed_check_ids: frozenset[str]) for a
+    resource's own tags/labels — the single source of truth both
+    add_resource() (below) and lensix-scanner-light's own suppressions-
+    table sync read from, so the two can't drift on what a tag actually
+    means. full_suppress=True makes suppressed_check_ids moot (the whole
+    resource is gone), but both are always returned for callers that want
+    to record intent even when full suppression already covers it."""
+    normalized = _normalize_tags(tags)
+    full_suppress = str(normalized.get(SUPPRESS_TAG_KEY, '')).strip().lower() == 'true'
+    checks_value = normalized.get(SUPPRESS_CHECKS_TAG_KEY, '') or ''
+    suppressed_check_ids = frozenset(
+        check_id for check_id in (c.strip() for c in checks_value.split('-')) if check_id
+    )
+    return full_suppress, suppressed_check_ids
+
+
 class InventoryWriter:
     """Collects resource records in memory, then writes the whole file in
     one pass so the manifest (which needs final counts) can be line 1."""
@@ -71,9 +160,58 @@ class InventoryWriter:
         self._counts = defaultdict(int)
         self._regions = set()
         self._errors = []
+        self._tag_suppressions = []
 
     def add_resource(self, resource_type, region, resource_id, resource_name,
-                      raw, scope_id=None, secret_scan_hits=None):
+                      raw, scope_id=None, secret_scan_hits=None, tags=None):
+        """tags: this resource's own tags/labels, in whichever of the two
+        real shapes the caller already has them in (AWS's list of
+        {'Key','Value'} dicts, or Azure/GCP's flat {key: value} dict) —
+        see this module's own "Tag-based suppression" section above for
+        the full convention. Omit (or pass None) for a resource type this
+        provider's tagging doesn't apply to; nothing about suppression
+        applies to it then, same as before tags= existed.
+
+        A resource tagged lensix-suppress=true is NOT recorded at all —
+        it never becomes a `records` entry, so it never reaches
+        persist_resources()/findings evaluation/anything downstream; the
+        "should not be sent to Lensix" the tag promises is literal. A
+        resource tagged lensix-suppress-checks=<ids> IS recorded
+        normally, with raw['_SuppressedCheckIds'] injected so every
+        scanner-light check-evaluation loop can skip just those checks
+        for it. Either way, the intent is also recorded in
+        tag_suppressions (below) for lensix-scanner-light's own
+        suppressions-table sync — a separate, visibility-only step; this
+        method's own enforcement above doesn't depend on that sync
+        happening or succeeding."""
+        full_suppress, suppressed_check_ids = parse_tag_suppression(tags)
+        if full_suppress or suppressed_check_ids:
+            self._tag_suppressions.append({
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "region": region,
+                "full_suppress": full_suppress,
+                "check_ids": sorted(suppressed_check_ids),
+            })
+        if full_suppress:
+            return
+
+        if suppressed_check_ids:
+            raw = dict(raw) if isinstance(raw, dict) else raw
+            if isinstance(raw, dict):
+                # A sorted list, not the frozenset itself: this raw dict
+                # gets JSON-serialized verbatim by write() for the
+                # upload path, and json.dumps has no native frozenset
+                # support — _json_default's str(value) fallback would
+                # otherwise mangle it into a single unusable string like
+                # "frozenset({'ec2_deletion_protection'})" instead of a
+                # real JSON array. A plain list works identically for
+                # every `in` check/iteration this value is used for
+                # (see ec2_import.py's per-resource _active()/
+                # eni_suppressed_check_ids usage) on both the live path
+                # (never serialized) and the upload path (always is).
+                raw['_SuppressedCheckIds'] = sorted(suppressed_check_ids)
+
         record = {
             "kind": "resource",
             "resource_type": resource_type,
@@ -105,6 +243,16 @@ class InventoryWriter:
     @property
     def resource_counts(self):
         return dict(self._counts)
+
+    @property
+    def tag_suppressions(self):
+        """Every resource whose own tags requested suppression (full or
+        per-check), gathered so far — including ones NOT in `records`,
+        since a fully-suppressed resource is deliberately excluded from
+        there. lensix-scanner-light's own suppressions-table sync reads
+        this to keep the app's existing Suppressions UI showing tag-
+        derived suppressions too, alongside manually-created ones."""
+        return list(self._tag_suppressions)
 
     @property
     def records(self):

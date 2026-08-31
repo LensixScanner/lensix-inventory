@@ -61,6 +61,15 @@ class TestGather:
         assert kwargs['scope_id'] == 'vpc-1'
         assert kwargs['raw']['_Rules'] == [rule]
 
+    def test_group_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        sg = {'GroupId': 'sg-1', 'GroupName': 'web', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _ec2_client_split([sg], [])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        group_call = next(c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'security_group')
+        assert group_call.kwargs['tags'] == sg['Tags']
+
     def test_a_group_with_no_matching_rules_gets_an_empty_rules_list(self):
         w = MagicMock()
         sg = {'GroupId': 'sg-1', 'GroupName': 'web'}

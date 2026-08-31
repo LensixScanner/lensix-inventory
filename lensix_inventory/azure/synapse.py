@@ -24,11 +24,13 @@ def gather(credential, subscription_id, writer):
         return
 
     for ws in workspaces:
+        raw = ws.as_dict()
         writer.add_resource(
             resource_type='synapse_workspace',
             region=ws.location or 'global',
             resource_id=ws.id,
             resource_name=ws.name,
             scope_id=_resource_group(ws.id),
-            raw=ws.as_dict(),
+            raw=raw,
+            tags=raw.get('tags'),
         )

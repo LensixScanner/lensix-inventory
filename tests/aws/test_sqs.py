@@ -5,11 +5,13 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.sqs as m
 
 
-def _sqs_client(urls, attrs_by_url=None, attrs_error_urls=None):
+def _sqs_client(urls, attrs_by_url=None, attrs_error_urls=None, tags_by_url=None):
     client = MagicMock()
     client.get_paginator.return_value.paginate.return_value = [{'QueueUrls': urls}]
     attrs_by_url = attrs_by_url or {}
     attrs_error_urls = attrs_error_urls or set()
+    tags_by_url = tags_by_url or {}
+    client.list_queue_tags.side_effect = lambda QueueUrl: {'Tags': tags_by_url.get(QueueUrl, {})}
 
     def _get_attrs(QueueUrl, AttributeNames):
         if QueueUrl in attrs_error_urls:
@@ -30,7 +32,16 @@ class TestGather:
         w.add_resource.assert_called_once_with(
             resource_type='sqs_queue', region='us-east-1',
             resource_id='arn:aws:sqs:us-east-1:123456789012:my-queue', resource_name='my-queue', raw=attrs,
+            tags={},
         )
+
+    def test_queue_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        url = 'https://sqs.us-east-1.amazonaws.com/123456789012/my-queue'
+        client = _sqs_client([url], attrs_by_url={url: {}}, tags_by_url={url: {'lensix-suppress': 'true'}})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['tags'] == {'lensix-suppress': 'true'}
 
     def test_falls_back_to_the_url_when_arn_missing_from_attributes(self):
         w = MagicMock()

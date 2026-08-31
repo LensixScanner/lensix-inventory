@@ -91,6 +91,24 @@ def get_escalation_actions(arn):
     ]
 
 
+def get_user_tags(username):
+    """list_users' own response doesn't include tags — IAM's own
+    separate, paginated list_user_tags call. Returns [] on failure."""
+    iam = boto3.client('iam')
+    tags = []
+    try:
+        kwargs = {'UserName': username}
+        while True:
+            resp = iam.list_user_tags(**kwargs)
+            tags.extend(resp.get('Tags', []))
+            if not resp.get('IsTruncated'):
+                break
+            kwargs['Marker'] = resp.get('Marker')
+    except Exception:
+        return []
+    return tags
+
+
 def get_credential_report():
     """Returns the raw CSV content as a string. A report generation task
     already in progress (for this account, or a concurrent gather of it)
@@ -159,4 +177,5 @@ def gather(writer):
             resource_id=arn,
             resource_name=username,
             raw=raw,
+            tags=get_user_tags(username),
         )

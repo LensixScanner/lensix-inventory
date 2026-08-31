@@ -36,10 +36,24 @@ def get_distribution_config(dist_id):
     return cf.get_distribution(Id=dist_id)['Distribution']['DistributionConfig']
 
 
+def get_distribution_tags(arn):
+    """CloudFront tags aren't part of list_distributions/get_distribution's
+    response — its own separate call, keyed by ARN, with the tag list
+    nested an extra level under 'Items' (a CloudFront-specific response
+    shape, not the flat {'Tags': [...]} most other services use). Returns
+    [] on failure."""
+    cf = boto3.client('cloudfront', region_name='us-east-1')
+    try:
+        return cf.list_tags_for_resource(Resource=arn).get('Tags', {}).get('Items', [])
+    except Exception:
+        return []
+
+
 def gather(writer):
     for dist in get_distributions():
         dist_id = dist['Id']
         domain_name = dist.get('DomainName', dist_id)
+        arn = dist.get('ARN', dist_id)
         raw = dict(dist)
         try:
             raw['_DistributionConfig'] = get_distribution_config(dist_id)
@@ -51,4 +65,5 @@ def gather(writer):
             resource_id=dist_id,
             resource_name=domain_name,
             raw=raw,
+            tags=get_distribution_tags(arn),
         )

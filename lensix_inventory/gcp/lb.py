@@ -55,6 +55,12 @@ def get_target_https_proxies(compute, project_id):
 
 
 def gather(project_id, credentials, writer):
+    # No tags= anywhere in this module: none of BackendService, SslPolicy,
+    # or TargetHttpsProxy have a `labels` field in the Compute Engine v1
+    # API at all — confirmed against the real discovery document schema
+    # (same check that caught vpc.py's own Firewall/Network/Subnetwork
+    # mistake — see docs/tag-suppressions.md), not assumed. A genuine
+    # architectural N/A, same class as kms.py's own KeyRing.
     compute = discovery.build('compute', 'v1', credentials=credentials)
 
     try:
