@@ -15,13 +15,17 @@ import lensix_inventory.azure.network as m
 
 
 def _vnet(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/virtualNetworks/vnet1',
-          name='vnet1', tags=None):
+          name='vnet1', tags=None, subnets=None):
     vnet = MagicMock()
     vnet.location = location
     vnet.id = rid
     vnet.name = name
-    vnet.as_dict.return_value = {'id': rid, 'name': name, 'tags': tags}
+    vnet.as_dict.return_value = {'id': rid, 'name': name, 'tags': tags, 'subnets': subnets}
     return vnet
+
+
+def _subnet(sid='/subscriptions/s1/.../virtualNetworks/vnet1/subnets/subnet1', name='subnet1', address_prefix='10.0.1.0/24'):
+    return {'id': sid, 'name': name, 'address_prefix': address_prefix}
 
 
 def _peering(rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/virtualNetworks/vnet1/virtualNetworkPeerings/peer1',
@@ -119,3 +123,70 @@ class TestGather:
         with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+    def test_gathers_one_resource_per_subnet_on_the_vnet(self):
+        w = MagicMock()
+        vnet = _vnet(subnets=[_subnet(sid='sub-a'), _subnet(sid='sub-b', name='subnet2', address_prefix='10.0.2.0/24')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        resource_types = [c.kwargs['resource_type'] for c in w.add_resource.call_args_list]
+        assert resource_types == ['virtual_network', 'subnet', 'subnet']
+
+    def test_subnet_scope_id_is_the_parent_vnets_own_resource_id(self):
+        # Mirrors aws/vpc.py's subnet scope_id = VpcId convention — lets the
+        # web app's existing scope self-join resolve a subnet's parent
+        # network the same way for every provider.
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1', subnets=[_subnet()])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        _, subnet_call = w.add_resource.call_args_list
+        assert subnet_call.kwargs['scope_id'] == 'vnet-1'
+
+    def test_subnet_carries_its_own_id_name_and_raw_address_prefix(self):
+        w = MagicMock()
+        vnet = _vnet(subnets=[_subnet(sid='sub-a', name='subnet1', address_prefix='10.0.1.0/24')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        _, subnet_call = w.add_resource.call_args_list
+        assert subnet_call.kwargs['resource_id'] == 'sub-a'
+        assert subnet_call.kwargs['resource_name'] == 'subnet1'
+        assert subnet_call.kwargs['raw']['address_prefix'] == '10.0.1.0/24'
+
+    def test_subnet_inherits_the_parent_vnets_own_tags(self):
+        w = MagicMock()
+        vnet = _vnet(tags={'lensix-suppress-checks': 'network_unknownpeering'}, subnets=[_subnet()])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        _, subnet_call = w.add_resource.call_args_list
+        assert subnet_call.kwargs['tags'] == {'lensix-suppress-checks': 'network_unknownpeering'}
+
+    def test_a_vnet_with_no_subnets_key_at_all_gathers_no_subnets(self):
+        # as_dict() omits 'subnets' entirely for some SDK/API edge cases —
+        # confirms the `or []` fallback, not just the `subnets=None` default
+        # every other test in this file already implies.
+        w = MagicMock()
+        vnet = MagicMock()
+        vnet.location = 'eastus'
+        vnet.id = 'vnet-1'
+        vnet.name = 'vnet1'
+        vnet.as_dict.return_value = {'id': 'vnet-1', 'name': 'vnet1'}
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        resource_types = [c.kwargs['resource_type'] for c in w.add_resource.call_args_list]
+        assert resource_types == ['virtual_network']
