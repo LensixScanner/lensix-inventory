@@ -93,11 +93,53 @@ class TestGather:
         with patch.object(m.boto3, 'client', side_effect=_clients(_asg_client([asg]), ec2_client)):
             m.gather('us-east-1', w)
         assert asg['_LaunchTemplatePublicIp'] is None
-        w.add_error.assert_called_once()
-        args = w.add_error.call_args[0]
-        assert args[0] == 'us-east-1'
-        assert 'web-asg' in args[2] and 'AccessDenied' in args[2]
+        assert asg['_LaunchTemplateIamRole'] is None
+        assert asg['_LaunchTemplateUserdataSecretHits'] == []
+        # All three independent lookups hit the same broken launch template
+        # version, so all three record their own error.
+        assert w.add_error.call_count == 3
+        for args in (c[0] for c in w.add_error.call_args_list):
+            assert args[0] == 'us-east-1'
+            assert 'web-asg' in args[2] and 'AccessDenied' in args[2]
         w.add_resource.assert_called_once()  # still gathered despite the lookup failure
+
+    def test_attaches_launch_template_iam_role_result_to_the_raw_record(self):
+        w = MagicMock()
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'},
+        }
+        lt_version = {'LaunchTemplateData': {'IamInstanceProfile': {'Arn': 'arn:aws:iam::1:instance-profile/role'}}}
+        with patch.object(m.boto3, 'client', side_effect=_clients(_asg_client([asg]), _ec2_client([lt_version]))):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateIamRole'] == {'Arn': 'arn:aws:iam::1:instance-profile/role'}
+
+    def test_no_launch_template_means_no_iam_role_possible(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateIamRole'] is None
+
+    def test_attaches_launch_template_userdata_secret_hits_to_the_raw_record(self):
+        import base64
+        w = MagicMock()
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'},
+        }
+        encoded = base64.b64encode(b'aws_secret_access_key=AKIA_SOMETHING_SECRET').decode()
+        lt_version = {'LaunchTemplateData': {'UserData': encoded}}
+        with patch.object(m.boto3, 'client', side_effect=_clients(_asg_client([asg]), _ec2_client([lt_version]))):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateUserdataSecretHits'] == ['AWS Secret Access Key']
+
+    def test_no_launch_template_means_no_userdata_secret_hits(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateUserdataSecretHits'] == []
 
 
 class TestLaunchTemplateSpec:
@@ -184,3 +226,119 @@ class TestLaunchesWithPublicIp:
 
     def test_no_launch_template_or_configuration_returns_none(self):
         assert m._launches_with_public_ip({}, 'us-east-1') is None
+
+
+class TestLaunchTemplateIamRole:
+    def test_launch_configuration_role(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = _asg_client(launch_configs=[{'IamInstanceProfile': 'my-profile'}])
+        with patch.object(m.boto3, 'client', return_value=asg_client):
+            assert m._launch_template_iam_role(asg, 'us-east-1') == 'my-profile'
+
+    def test_launch_configuration_missing_returns_none(self):
+        asg = {'LaunchConfigurationName': 'lc-gone'}
+        with patch.object(m.boto3, 'client', return_value=_asg_client(launch_configs=[])):
+            assert m._launch_template_iam_role(asg, 'us-east-1') is None
+
+    def test_launch_configuration_lookup_error_propagates(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = MagicMock()
+        asg_client.describe_launch_configurations.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=asg_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_iam_role(asg, 'us-east-1')
+
+    def test_launch_template_by_id_role(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        ec2_client = _ec2_client([{'LaunchTemplateData': {'IamInstanceProfile': {'Arn': 'arn:aws:iam::1:instance-profile/role'}}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_iam_role(asg, 'us-east-1') == {'Arn': 'arn:aws:iam::1:instance-profile/role'}
+        ec2_client.describe_launch_template_versions.assert_called_once_with(
+            Versions=['$Latest'], LaunchTemplateId='lt-1',
+        )
+
+    def test_launch_template_by_name_when_no_id(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateName': 'my-lt', 'Version': '2'}}
+        ec2_client = _ec2_client([{'LaunchTemplateData': {}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_iam_role(asg, 'us-east-1') is None
+        ec2_client.describe_launch_template_versions.assert_called_once_with(
+            Versions=['2'], LaunchTemplateName='my-lt',
+        )
+
+    def test_launch_template_version_not_found_returns_none(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        with patch.object(m.boto3, 'client', return_value=_ec2_client([])):
+            assert m._launch_template_iam_role(asg, 'us-east-1') is None
+
+    def test_launch_template_lookup_error_propagates(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        ec2_client = MagicMock()
+        ec2_client.describe_launch_template_versions.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=ec2_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_iam_role(asg, 'us-east-1')
+
+    def test_no_launch_template_or_configuration_returns_none(self):
+        assert m._launch_template_iam_role({}, 'us-east-1') is None
+
+
+class TestLaunchTemplateUserdataSecretHits:
+    def _b64(self, text):
+        import base64
+        return base64.b64encode(text.encode()).decode()
+
+    def test_launch_configuration_userdata_scanned(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        encoded = self._b64('aws_secret_access_key=AKIA_SOMETHING_SECRET')
+        asg_client = _asg_client(launch_configs=[{'UserData': encoded}])
+        with patch.object(m.boto3, 'client', return_value=asg_client):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == ['AWS Secret Access Key']
+
+    def test_launch_configuration_no_userdata_returns_empty_list(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = _asg_client(launch_configs=[{}])
+        with patch.object(m.boto3, 'client', return_value=asg_client):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == []
+
+    def test_launch_configuration_missing_returns_empty_list(self):
+        asg = {'LaunchConfigurationName': 'lc-gone'}
+        with patch.object(m.boto3, 'client', return_value=_asg_client(launch_configs=[])):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == []
+
+    def test_launch_configuration_lookup_error_propagates(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = MagicMock()
+        asg_client.describe_launch_configurations.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=asg_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_userdata_secret_hits(asg, 'us-east-1')
+
+    def test_launch_template_userdata_scanned(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        encoded = self._b64('aws_secret_access_key=AKIA_SOMETHING_SECRET')
+        ec2_client = _ec2_client([{'LaunchTemplateData': {'UserData': encoded}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == ['AWS Secret Access Key']
+        ec2_client.describe_launch_template_versions.assert_called_once_with(
+            Versions=['$Latest'], LaunchTemplateId='lt-1',
+        )
+
+    def test_launch_template_no_secrets_returns_empty_list(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        encoded = self._b64('echo hello world')
+        ec2_client = _ec2_client([{'LaunchTemplateData': {'UserData': encoded}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == []
+
+    def test_launch_template_version_not_found_returns_empty_list(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        with patch.object(m.boto3, 'client', return_value=_ec2_client([])):
+            assert m._launch_template_userdata_secret_hits(asg, 'us-east-1') == []
+
+    def test_launch_template_lookup_error_propagates(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        ec2_client = MagicMock()
+        ec2_client.describe_launch_template_versions.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=ec2_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_userdata_secret_hits(asg, 'us-east-1')
+
+    def test_no_launch_template_or_configuration_returns_empty_list(self):
+        assert m._launch_template_userdata_secret_hits({}, 'us-east-1') == []

@@ -208,6 +208,64 @@ def _mig_launches_with_public_ip(compute, project_id, mig):
     return _network_interfaces_have_access_config(network_interfaces)
 
 
+def _mig_instance_template_service_accounts(compute, project_id, mig):
+    """The raw `serviceAccounts` list from this MIG's instance template
+    (each entry an {'email': ..., 'scopes': [...]} dict, the SDK's native
+    shape) — None when the MIG has no resolvable template reference, or
+    the template has no serviceAccounts entry at all. A separate template
+    lookup from _mig_launches_with_public_ip's own (rather than sharing
+    one fetch) deliberately mirrors that function's exact contract —
+    same fetch-by-name, same "raise on lookup failure, caller is the
+    error boundary" discipline — so this one MIG-level lookup doesn't
+    need its own bespoke error handling; gather()'s existing try/except
+    around each derived MIG field already covers it. Used to evaluate
+    lensix-scanner-light's compute_defaultserviceaccount/
+    compute_fullapiaccess checks once per MIG instead of once per member
+    instance (see compute_migpublicip for the established precedent this
+    follows)."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('serviceAccounts')
+
+
+def _mig_instance_template_can_ip_forward(compute, project_id, mig):
+    """template.properties.canIpForward (bool) or None if the MIG has no
+    resolvable template reference, or the template has no canIpForward
+    entry at all — a third, independent template fetch from
+    _mig_launches_with_public_ip's/_mig_instance_template_service_accounts's
+    own (same deliberate "isolate failure per fact" trade-off already
+    accepted this session for the service-account addition, at the cost
+    of one more API call per MIG rather than refactoring the existing
+    lookups to share one fetch). Same "raise on lookup failure, caller is
+    the error boundary" discipline as its siblings — gather()'s existing
+    try/except around each derived MIG field already covers it. Used to
+    evaluate lensix-scanner-light's compute_migipforwarding check once per
+    MIG instead of once per member instance."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('canIpForward')
+
+
+def _mig_instance_template_disks(compute, project_id, mig):
+    """The raw properties.disks[] list from this MIG's instance template —
+    same AttachedDisk shape check_nodiskencryption already reads off a
+    live instance's own disks[], so compute_migdiskencryption_raw can
+    reuse its exact boot-disk-lookup logic against this instead of
+    writing new field paths. None when the MIG has no resolvable template
+    reference, or the template has no disks entry at all. A fourth,
+    independent template fetch from its siblings' own — same discipline
+    as _mig_instance_template_can_ip_forward above."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('disks')
+
+
 def gather(project_id, credentials, writer):
     """Gathers all Compute Engine-owned resource types for this project into
     `writer`."""
@@ -306,6 +364,33 @@ def gather(project_id, credentials, writer):
             # than swallowed, same reasoning as autoscaling.py's own
             # equivalent gather() loop.
             raw['_InstanceTemplatePublicIp'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            raw['_InstanceTemplateServiceAccounts'] = _mig_instance_template_service_accounts(compute, project_id, mig)
+        except Exception as e:
+            # Same isolation as the public-IP lookup above — a second,
+            # independent template fetch (not shared with it) so either
+            # one failing doesn't take the other down.
+            raw['_InstanceTemplateServiceAccounts'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            raw['_InstanceTemplateCanIpForward'] = _mig_instance_template_can_ip_forward(compute, project_id, mig)
+        except Exception as e:
+            # Same isolation as the two lookups above — a third,
+            # independent template fetch so a failure here doesn't take
+            # the others down.
+            raw['_InstanceTemplateCanIpForward'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            raw['_InstanceTemplateDisks'] = _mig_instance_template_disks(compute, project_id, mig)
+        except Exception as e:
+            # Same isolation as the three lookups above — a fourth,
+            # independent template fetch so a failure here doesn't take
+            # the others down.
+            raw['_InstanceTemplateDisks'] = None
             writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
                               message=f"{mig.get('name', '')}: {e}")
         # No tags= here: InstanceGroupManager has no `labels` field in the

@@ -253,6 +253,106 @@ class TestMigLaunchesWithPublicIp:
             assert str(e) == 'boom'
 
 
+class TestMigInstanceTemplateServiceAccounts:
+    def test_returns_the_template_service_accounts_list(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'serviceAccounts': [{'email': 'a@b.com', 'scopes': ['scope-1']}]},
+        }
+        assert m._mig_instance_template_service_accounts(compute, 'proj-1', mig) == [
+            {'email': 'a@b.com', 'scopes': ['scope-1']},
+        ]
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_service_accounts(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_service_accounts_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_service_accounts(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_service_accounts(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
+class TestMigInstanceTemplateCanIpForward:
+    def test_returns_the_template_can_ip_forward_flag(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'canIpForward': True},
+        }
+        assert m._mig_instance_template_can_ip_forward(compute, 'proj-1', mig) is True
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_can_ip_forward(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_can_ip_forward_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_can_ip_forward(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_can_ip_forward(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
+class TestMigInstanceTemplateDisks:
+    def test_returns_the_template_disks_list(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'disks': [{'boot': True, 'diskEncryptionKey': {'kmsKeyName': 'k1'}}]},
+        }
+        assert m._mig_instance_template_disks(compute, 'proj-1', mig) == [
+            {'boot': True, 'diskEncryptionKey': {'kmsKeyName': 'k1'}},
+        ]
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_disks(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_disks_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_disks(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_disks(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
 class TestGatherMigPublicIpIntegration:
     def _compute_with_mig(self, mig, template_response=None, template_side_effect=None):
         compute = MagicMock()
@@ -287,6 +387,11 @@ class TestGatherMigPublicIpIntegration:
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplatePublicIp'] is True
 
     def test_a_template_lookup_failure_is_recorded_not_swallowed(self):
+        # The public-IP, service-account, can-ip-forward, and disks
+        # lookups are four independent template fetches (see
+        # _mig_instance_template_service_accounts's own docstring) — a
+        # shared side_effect here fails ALL FOUR, so each gets its own
+        # add_error call, not one.
         mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
                'instanceTemplate': 'https://.../instanceTemplates/web-template'}
         compute = self._compute_with_mig(mig, template_side_effect=RuntimeError('AccessDenied'))
@@ -295,6 +400,54 @@ class TestGatherMigPublicIpIntegration:
             m.gather('proj-1', MagicMock(), w)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplatePublicIp'] is None
-        w.add_error.assert_called_once()
-        args = w.add_error.call_args
-        assert 'web-mig' in args.kwargs['message'] and 'AccessDenied' in args.kwargs['message']
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateServiceAccounts'] is None
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateCanIpForward'] is None
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateDisks'] is None
+        assert w.add_error.call_count == 4
+        for args in w.add_error.call_args_list:
+            assert 'web-mig' in args.kwargs['message'] and 'AccessDenied' in args.kwargs['message']
+
+    def test_mig_resource_carries_the_can_ip_forward_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'canIpForward': True},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateCanIpForward'] is True
+
+    def test_mig_resource_carries_the_disks_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'disks': [{'boot': True, 'diskEncryptionKey': None}]},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateDisks'] == [
+            {'boot': True, 'diskEncryptionKey': None},
+        ]
+
+    def test_mig_resource_carries_the_service_accounts_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {
+                'networkInterfaces': [{'network': 'default'}],
+                'serviceAccounts': [{'email': '123-compute@developer.gserviceaccount.com',
+                                      'scopes': ['https://www.googleapis.com/auth/cloud-platform']}],
+            },
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateServiceAccounts'] == [
+            {'email': '123-compute@developer.gserviceaccount.com',
+             'scopes': ['https://www.googleapis.com/auth/cloud-platform']},
+        ]
