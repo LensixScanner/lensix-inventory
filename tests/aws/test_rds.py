@@ -277,6 +277,37 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['rds_instance'].kwargs['raw']['_LatestMajorVersions'] is None
 
+    def test_an_instance_whose_arn_is_protected_is_stamped_true(self):
+        w = MagicMock()
+        instance = {'DBInstanceIdentifier': 'db1', 'DBInstanceArn': 'arn:aws:rds:us-east-1:1:db:db1'}
+        client = _client(instances=[instance])
+        with patch.object(m, 'get_protected_resource_arns', return_value={'arn:aws:rds:us-east-1:1:db:db1'}):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_instance'].kwargs['raw']['_ProtectedByAwsBackup'] is True
+
+    def test_an_instance_whose_arn_is_not_protected_is_stamped_false(self):
+        w = MagicMock()
+        instance = {'DBInstanceIdentifier': 'db1', 'DBInstanceArn': 'arn:aws:rds:us-east-1:1:db:db1'}
+        client = _client(instances=[instance])
+        with patch.object(m, 'get_protected_resource_arns', return_value=set()):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_instance'].kwargs['raw']['_ProtectedByAwsBackup'] is False
+
+    def test_a_backup_lookup_failure_stamps_false_and_records_an_error_but_does_not_abort_gather(self):
+        w = MagicMock()
+        instance = {'DBInstanceIdentifier': 'db1', 'DBInstanceArn': 'arn:aws:rds:us-east-1:1:db:db1'}
+        client = _client(instances=[instance])
+        with patch.object(m, 'get_protected_resource_arns', side_effect=RuntimeError('AccessDenied')):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        assert any(c.kwargs['source'] == 'rds (aws backup protected resources)' for c in w.add_error.call_args_list)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['rds_instance'].kwargs['raw']['_ProtectedByAwsBackup'] is False
+
 
 class TestGetLatestMajorVersions:
     def test_returns_sorted_unique_majors(self):

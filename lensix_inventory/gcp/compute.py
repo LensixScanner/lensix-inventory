@@ -266,6 +266,66 @@ def _mig_instance_template_disks(compute, project_id, mig):
     return (template.get('properties') or {}).get('disks')
 
 
+def _mig_instance_template_shielded_config(compute, project_id, mig):
+    """The raw properties.shieldedInstanceConfig dict from this MIG's
+    instance template (same {'enableSecureBoot': ..., 'enableVtpm': ...,
+    'enableIntegrityMonitoring': ...} shape check_noshieldedboot/
+    check_novtpm/check_nointegritymonitoring already read off a live
+    instance's own shieldedInstanceConfig), so compute_mignoshieldedboot_raw/
+    compute_mignovtpm_raw/compute_mignointegritymonitoring_raw can reuse
+    those three checks' exact condition logic against this one shared
+    field instead of writing new field paths — three check_ids, one
+    fetch. None when the MIG has no resolvable template reference, or the
+    template has no shieldedInstanceConfig entry at all. A fifth,
+    independent template fetch from its siblings' own — same discipline
+    as _mig_instance_template_disks above."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('shieldedInstanceConfig')
+
+
+def _mig_instance_template_scheduling(compute, project_id, mig):
+    """The raw properties.scheduling dict from this MIG's instance
+    template (same {'automaticRestart': ..., 'onHostMaintenance': ...}
+    shape check_noautorestart/check_nomaintmigration already read off a
+    live instance's own scheduling), so compute_mignoautorestart_raw/
+    compute_mignomaintmigration_raw can reuse those two checks' exact
+    condition logic against this one shared field — two check_ids, one
+    fetch. None when the MIG has no resolvable template reference, or the
+    template has no scheduling entry at all. A sixth, independent
+    template fetch from its siblings' own — same discipline as
+    _mig_instance_template_disks above."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('scheduling')
+
+
+def _mig_instance_template_metadata_items(compute, project_id, mig):
+    """The raw properties.metadata.items list from this MIG's instance
+    template — the exact same raw shape the per-instance path reads off
+    instance.metadata.items, so this module's own already-generic
+    `_redact_metadata(items)` helper (see its own docstring) can be
+    reused as-is against it, no new secret-scanning logic needed.
+    Backs compute_migserialport_raw/compute_migoslogin_raw/
+    compute_migoslogin2fa_raw/compute_migsecretsinmetadata_raw — four
+    check_ids sharing this one fetch. None when the MIG has no resolvable
+    template reference, or the template has no metadata entry at all —
+    `_redact_metadata(None)` already degrades that case to empty results,
+    same as it does for an instance with no metadata at all, so callers
+    don't need a separate None-guard around it. A seventh, independent
+    template fetch from its siblings' own — same discipline as
+    _mig_instance_template_disks above."""
+    template_name = _mig_instance_template_name(mig)
+    if not template_name:
+        return None
+    template = compute.instanceTemplates().get(project=project_id, instanceTemplate=template_name).execute()
+    return (template.get('properties') or {}).get('metadata', {}).get('items')
+
+
 def gather(project_id, credentials, writer):
     """Gathers all Compute Engine-owned resource types for this project into
     `writer`."""
@@ -391,6 +451,44 @@ def gather(project_id, credentials, writer):
             # independent template fetch so a failure here doesn't take
             # the others down.
             raw['_InstanceTemplateDisks'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            raw['_InstanceTemplateShieldedConfig'] = _mig_instance_template_shielded_config(compute, project_id, mig)
+        except Exception as e:
+            # Same isolation as the four lookups above — a fifth,
+            # independent template fetch so a failure here doesn't take
+            # the others down.
+            raw['_InstanceTemplateShieldedConfig'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            raw['_InstanceTemplateScheduling'] = _mig_instance_template_scheduling(compute, project_id, mig)
+        except Exception as e:
+            # Same isolation as the five lookups above — a sixth,
+            # independent template fetch so a failure here doesn't take
+            # the others down.
+            raw['_InstanceTemplateScheduling'] = None
+            writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
+                              message=f"{mig.get('name', '')}: {e}")
+        try:
+            items = _mig_instance_template_metadata_items(compute, project_id, mig)
+            key_names, secret_hits, relevant_values = _redact_metadata(items)
+            raw['_InstanceTemplateMetadataItemValues'] = relevant_values
+            raw['_InstanceTemplateMetadataSecretHits'] = secret_hits
+        except Exception as e:
+            # Same isolation as the six lookups above — a seventh,
+            # independent template fetch so a failure here doesn't take
+            # the others down. This brings the MIG gather step to 7
+            # independent instanceTemplates().get() calls per MIG — flagged
+            # explicitly (see the plan this shipped from): a future
+            # consolidation refactor threading one shared fetch into all 7
+            # extractor functions would cut this to 1 call per MIG, but
+            # changing the 4 already-shipped, already-tested functions'
+            # signatures is a larger, separate, backward-compatibility-
+            # sensitive change — deliberately deferred, not bundled here.
+            raw['_InstanceTemplateMetadataItemValues'] = None
+            raw['_InstanceTemplateMetadataSecretHits'] = None
             writer.add_error(region=zone, source='instance_group_manager (instance template lookup)',
                               message=f"{mig.get('name', '')}: {e}")
         # No tags= here: InstanceGroupManager has no `labels` field in the

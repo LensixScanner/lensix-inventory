@@ -353,6 +353,108 @@ class TestMigInstanceTemplateDisks:
             assert str(e) == 'boom'
 
 
+class TestMigInstanceTemplateShieldedConfig:
+    def test_returns_the_template_shielded_config(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'shieldedInstanceConfig': {'enableSecureBoot': True, 'enableVtpm': True, 'enableIntegrityMonitoring': True}},
+        }
+        assert m._mig_instance_template_shielded_config(compute, 'proj-1', mig) == {
+            'enableSecureBoot': True, 'enableVtpm': True, 'enableIntegrityMonitoring': True,
+        }
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_shielded_config(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_shielded_config_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_shielded_config(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_shielded_config(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
+class TestMigInstanceTemplateScheduling:
+    def test_returns_the_template_scheduling(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'scheduling': {'automaticRestart': False, 'onHostMaintenance': 'TERMINATE'}},
+        }
+        assert m._mig_instance_template_scheduling(compute, 'proj-1', mig) == {
+            'automaticRestart': False, 'onHostMaintenance': 'TERMINATE',
+        }
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_scheduling(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_scheduling_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_scheduling(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_scheduling(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
+class TestMigInstanceTemplateMetadataItems:
+    def test_returns_the_template_metadata_items_list(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {
+            'properties': {'metadata': {'items': [{'key': 'serial-port-enable', 'value': 'true'}]}},
+        }
+        assert m._mig_instance_template_metadata_items(compute, 'proj-1', mig) == [
+            {'key': 'serial-port-enable', 'value': 'true'},
+        ]
+        compute.instanceTemplates.return_value.get.assert_called_once_with(project='proj-1', instanceTemplate='web-template')
+
+    def test_none_when_the_mig_has_no_template_reference(self):
+        compute = MagicMock()
+        assert m._mig_instance_template_metadata_items(compute, 'proj-1', {}) is None
+        compute.instanceTemplates.assert_not_called()
+
+    def test_none_when_the_template_has_no_metadata_entry(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.return_value = {'properties': {}}
+        assert m._mig_instance_template_metadata_items(compute, 'proj-1', mig) is None
+
+    def test_a_lookup_failure_propagates_rather_than_being_swallowed(self):
+        mig = {'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = MagicMock()
+        compute.instanceTemplates.return_value.get.return_value.execute.side_effect = RuntimeError('boom')
+        try:
+            m._mig_instance_template_metadata_items(compute, 'proj-1', mig)
+            assert False, 'expected RuntimeError to propagate'
+        except RuntimeError as e:
+            assert str(e) == 'boom'
+
+
 class TestGatherMigPublicIpIntegration:
     def _compute_with_mig(self, mig, template_response=None, template_side_effect=None):
         compute = MagicMock()
@@ -387,10 +489,11 @@ class TestGatherMigPublicIpIntegration:
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplatePublicIp'] is True
 
     def test_a_template_lookup_failure_is_recorded_not_swallowed(self):
-        # The public-IP, service-account, can-ip-forward, and disks
-        # lookups are four independent template fetches (see
+        # The public-IP, service-account, can-ip-forward, disks,
+        # shielded-config, scheduling, and metadata-items lookups are
+        # seven independent template fetches (see
         # _mig_instance_template_service_accounts's own docstring) — a
-        # shared side_effect here fails ALL FOUR, so each gets its own
+        # shared side_effect here fails ALL SEVEN, so each gets its own
         # add_error call, not one.
         mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
                'instanceTemplate': 'https://.../instanceTemplates/web-template'}
@@ -403,9 +506,65 @@ class TestGatherMigPublicIpIntegration:
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateServiceAccounts'] is None
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateCanIpForward'] is None
         assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateDisks'] is None
-        assert w.add_error.call_count == 4
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateShieldedConfig'] is None
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateScheduling'] is None
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateMetadataItemValues'] is None
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateMetadataSecretHits'] is None
+        assert w.add_error.call_count == 7
         for args in w.add_error.call_args_list:
             assert 'web-mig' in args.kwargs['message'] and 'AccessDenied' in args.kwargs['message']
+
+    def test_mig_resource_carries_the_shielded_config_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'shieldedInstanceConfig': {'enableSecureBoot': False}},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateShieldedConfig'] == {'enableSecureBoot': False}
+
+    def test_mig_resource_carries_the_scheduling_result(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'scheduling': {'automaticRestart': False}},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['instance_group_manager'].kwargs['raw']['_InstanceTemplateScheduling'] == {'automaticRestart': False}
+
+    def test_mig_resource_carries_the_metadata_item_values_and_secret_hits(self):
+        mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
+               'instanceTemplate': 'https://.../instanceTemplates/web-template'}
+        compute = self._compute_with_mig(mig, template_response={
+            'properties': {'metadata': {'items': [{'key': 'serial-port-enable', 'value': 'true'}]}},
+        })
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        raw = calls['instance_group_manager'].kwargs['raw']
+        assert raw['_InstanceTemplateMetadataItemValues'] == {'serial-port-enable': 'true'}
+        assert raw['_InstanceTemplateMetadataSecretHits'] == []
+
+    def test_mig_metadata_items_absent_still_yields_empty_dict_and_list(self):
+        # No template reference at all -> _mig_instance_template_metadata_items
+        # returns None -> _redact_metadata(None) degrades that to empty
+        # results, same as it does for an instance with no metadata.
+        mig = {'name': 'standalone-mig', 'selfLink': 'https://.../standalone-mig'}
+        compute = self._compute_with_mig(mig)
+        w = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        raw = calls['instance_group_manager'].kwargs['raw']
+        assert raw['_InstanceTemplateMetadataItemValues'] == {}
+        assert raw['_InstanceTemplateMetadataSecretHits'] == []
 
     def test_mig_resource_carries_the_can_ip_forward_result(self):
         mig = {'name': 'web-mig', 'selfLink': 'https://.../web-mig',
