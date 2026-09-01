@@ -1,10 +1,12 @@
-"""Virtual network gathering — VNets and their peering connections.
+"""Virtual network gathering — VNets, their subnets, and their peering
+connections.
 
 Only the data-fetching calls are included here (virtual_networks.list_all,
 virtual_network_peerings.list) — missing-DDoS-protection, single-subnet,
-and active-peering evaluation is left server-side. A `subnet` resource type
-isn't in this module's scope yet — see the VNet's own `raw['subnets']`
-embedded list from `as_dict()` in the meantime.
+and active-peering evaluation is left server-side. Subnets are gathered
+from each VNet's own `raw['subnets']` embedded list (from `as_dict()`) —
+no separate subnets.list() call exists on NetworkManagementClient; a VNet's
+subnets are only ever enumerable through the parent VNet itself.
 
 Requires: azure-mgmt-network.
 """
@@ -44,6 +46,23 @@ def gather(credential, subscription_id, writer):
             raw=vnet_raw,
             tags=vnet_tags,
         )
+
+        # Subnets have no `tags` field of their own in the Azure API (same
+        # gap as vnet_peering above) and no list operation of their own
+        # here — they inherit the parent VNet's tags, same rationale as
+        # peerings: a lensix-suppress-checks tag on the VNet also covers
+        # per-subnet checks (e.g. missing-NSG-association) evaluated
+        # against this data later.
+        for subnet in (vnet_raw.get('subnets') or []):
+            writer.add_resource(
+                resource_type='subnet',
+                region=region,
+                resource_id=subnet.get('id'),
+                resource_name=subnet.get('name'),
+                scope_id=vnet.id,
+                raw=subnet,
+                tags=vnet_tags,
+            )
 
         try:
             peerings = get_peerings(credential, subscription_id, rg, vnet.name)
