@@ -118,3 +118,33 @@ class TestGather:
         with patch.object(m.boto3, 'client', return_value=client):
             m.gather('us-east-1', w)
         assert '_LoggingStatus' not in cluster
+
+    def test_a_cluster_whose_namespace_arn_is_protected_is_stamped_true(self):
+        w = MagicMock()
+        arn = 'arn:aws:redshift:us-east-1:1:namespace:c1'
+        cluster = {'ClusterIdentifier': 'c1', 'ClusterNamespaceArn': arn}
+        client = _redshift_client([cluster])
+        with patch.object(m, 'get_protected_resource_arns', return_value={arn}):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['raw']['_ProtectedByAwsBackup'] is True
+
+    def test_a_cluster_whose_namespace_arn_is_not_protected_is_stamped_false(self):
+        w = MagicMock()
+        arn = 'arn:aws:redshift:us-east-1:1:namespace:c1'
+        cluster = {'ClusterIdentifier': 'c1', 'ClusterNamespaceArn': arn}
+        client = _redshift_client([cluster])
+        with patch.object(m, 'get_protected_resource_arns', return_value=set()):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        assert w.add_resource.call_args.kwargs['raw']['_ProtectedByAwsBackup'] is False
+
+    def test_a_backup_lookup_failure_stamps_false_and_records_an_error_but_does_not_abort_gather(self):
+        w = MagicMock()
+        cluster = {'ClusterIdentifier': 'c1', 'ClusterNamespaceArn': 'arn:aws:redshift:us-east-1:1:namespace:c1'}
+        client = _redshift_client([cluster])
+        with patch.object(m, 'get_protected_resource_arns', side_effect=RuntimeError('AccessDenied')):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        assert any(c.kwargs['source'] == 'redshift (aws backup protected resources)' for c in w.add_error.call_args_list)
+        assert w.add_resource.call_args.kwargs['raw']['_ProtectedByAwsBackup'] is False

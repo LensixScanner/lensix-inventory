@@ -26,11 +26,26 @@ instance, since it's a per-engine (not per-instance) fact. Still NOT
 replicated: `get_vcpus`/`extended_support_cost_per_hour` (pricing-table
 lookups against Lensix's own `instance_sizes` table, not an AWS API call
 at all).
+
+Whether each instance is centrally protected by AWS Backup (one region-
+wide backup.get_protected_resource_arns() call, isolated in its own
+try/except — see gather()'s own comment) is merged in as
+raw['_ProtectedByAwsBackup'], keyed by the instance's own DBInstanceArn
+(already present on the raw describe_db_instances record — not the short
+DBInstanceIdentifier used as resource_id). Unlike the None-on-failure
+"unknown" fields above, a lookup failure here stamps False on every
+instance rather than None — this field only ever suppresses a finding
+that would otherwise fire (rds_backupretention/rds_noautomatedbackups),
+so failing toward False means failing toward still firing, not toward
+silently hiding a real problem. See lensix_inventory.aws.backup's own
+docstring for the cross-service rationale.
 """
 
 from datetime import datetime, timedelta, timezone
 
 import boto3
+
+from .backup import get_protected_resource_arns
 
 CONNECTIONS_LOOKBACK_DAYS = 7
 
@@ -121,11 +136,25 @@ def gather(region, writer):
             majors_by_engine[engine] = None
             writer.add_error(region=region, source=f'rds (latest engine versions:{engine})', message=e)
 
+    # AWS Backup protection is a region-wide fact, not a per-instance one
+    # — one paginated call answers it for every instance at once. Isolated
+    # so a failure here degrades every instance's _ProtectedByAwsBackup to
+    # False (still fires the static check) rather than aborting the
+    # instance gather.
+    try:
+        protected_arns = get_protected_resource_arns(region)
+    except Exception as e:
+        protected_arns = None
+        writer.add_error(region=region, source='rds (aws backup protected resources)', message=e)
+
     for instance in instances:
         iid = instance['DBInstanceIdentifier']
         raw = dict(instance)
         raw['_SSLParameter'] = get_ssl_parameter(region, instance)
         raw['_LatestMajorVersions'] = majors_by_engine.get(instance.get('Engine'))
+        raw['_ProtectedByAwsBackup'] = (
+            False if protected_arns is None else instance.get('DBInstanceArn') in protected_arns
+        )
         if instance.get('DBInstanceStatus') == 'available':
             try:
                 raw['_ConnectionDatapoints'] = get_db_connections_7d(region, iid)

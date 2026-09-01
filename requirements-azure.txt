@@ -63,6 +63,17 @@ azure-mgmt-rdbms>=10.0
 # infrastructure_encryption), matching rsv_import.py's read; those go
 # camelCase at 4.0.0.
 azure-mgmt-recoveryservices>=3.0,<4.0
+# rsv.py's get_protected_vm_resource_ids() calls
+# RecoveryServicesBackupClient(...).backup_protected_items.list() to
+# power vm.py's _ProtectedByAzureBackup gather-time signal. Pinned to the
+# version verified installable/working (11.0.0) — no known breaking-change
+# floor established yet, unlike most of this file's other pins.
+azure-mgmt-recoveryservicesbackup>=11.0,<12.0
+# vm.py's _has_maintenance_configuration_assignment() calls
+# MaintenanceManagementClient(...).configuration_assignments.list() to
+# power vm_autoupdate's real Update-Manager/Automation coverage signal.
+# Pinned to the version verified installable/working (2.1.0).
+azure-mgmt-maintenance>=2.1,<3.0
 azure-mgmt-redis>=14.0
 # <10.0: SBNamespace goes fully nested at 10.0.0. At this floor,
 # disable_local_auth/encryption are flat (servicebus_nocmk/localauth

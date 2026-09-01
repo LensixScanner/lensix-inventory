@@ -40,6 +40,17 @@ _launch_template_userdata_secret_hits below. Each is its own API call
 (accepted trade-off, same as _launches_with_public_ip, rather than
 threading one shared lookup through all three checks) so a failure in one
 fact never blocks the other two.
+
+A fifth field, `_HasScheduledAction` (True/False/None), records whether
+the ASG has any ScheduledUpdateGroupAction attached — unlike the four
+fan-outs above, this is fetched ONCE for the whole region (see
+get_scheduled_actions' own docstring), not per-ASG. scanner-light's
+asg_notspot check needs this to avoid a real false-positive: an ASG that
+scales to zero overnight and back up each morning will have every current
+member look "freshly launched" a few hours after that scheduled scale-up,
+for reasons that have nothing to do with genuine elasticity/churn — the
+member-age heuristic alone can't tell the two apart, so the check bails
+out entirely when a schedule is present (or unknown) rather than guessing.
 """
 
 import base64
@@ -58,6 +69,21 @@ def get_asgs(region):
     for page in asg_client.get_paginator('describe_auto_scaling_groups').paginate(PaginationConfig={'PageSize': 100}):
         asgs.extend(page['AutoScalingGroups'])
     return asgs
+
+
+def get_scheduled_actions(region):
+    """Every ScheduledUpdateGroupAction in this region, across every ASG —
+    one paginated describe_scheduled_actions() call for the whole region
+    (called with no AutoScalingGroupName filter) rather than one call per
+    ASG. Unlike the per-ASG launch-template/configuration lookups below,
+    a schedule listing has no per-ASG-specific request shape to resolve,
+    so there's nothing to gain from doing this one-at-a-time the way
+    _launches_with_public_ip and friends have to."""
+    asg_client = boto3.client('autoscaling', region_name=region, config=_BOTO_CFG)
+    actions = []
+    for page in asg_client.get_paginator('describe_scheduled_actions').paginate(PaginationConfig={'PageSize': 100}):
+        actions.extend(page['ScheduledUpdateGroupActions'])
+    return actions
 
 
 def _launch_template_spec(asg):
@@ -215,8 +241,68 @@ def _launch_template_userdata_secret_hits(asg, region):
     return _decode_and_scan_userdata(versions[0].get('LaunchTemplateData', {}).get('UserData'))
 
 
+def _launch_template_market_type(asg, region):
+    """'spot' / 'on-demand' / None (indeterminate — no launch template/
+    configuration referenced at all, or the referenced version/name no
+    longer exists) for the ASG's actual referenced launch template
+    version or launch configuration. Same lc_name / launch-template-spec
+    resolution as _launches_with_public_ip and _launch_template_iam_role,
+    read here for a different field: LaunchTemplateData.
+    InstanceMarketOptions.MarketType (launch template) or the presence of
+    the deprecated SpotPrice field (launch configuration, which predates
+    InstanceMarketOptions and only ever supports the Spot market through
+    that one field). This is distinct from — and does not attempt to
+    read — MixedInstancesPolicy.InstancesDistribution.
+    OnDemandPercentageAboveBaseCapacity, which is a genuinely different,
+    per-instance-varying signal that scanner-light's asg_notspot check
+    reads directly off the ASG's own raw record instead (no live call
+    needed for that one). Any lookup FAILURE still raises rather than
+    returning None, same error-boundary discipline as
+    _launches_with_public_ip — see gather()'s own try/except below."""
+    lc_name = asg.get('LaunchConfigurationName')
+    if lc_name:
+        asg_client = boto3.client('autoscaling', region_name=region, config=_BOTO_CFG)
+        lcs = asg_client.describe_launch_configurations(
+            LaunchConfigurationNames=[lc_name],
+        )['LaunchConfigurations']
+        if not lcs:
+            return None
+        return 'spot' if lcs[0].get('SpotPrice') else 'on-demand'
+
+    lt = _launch_template_spec(asg)
+    if not lt:
+        return None
+    ec2_client = boto3.client('ec2', region_name=region, config=_BOTO_CFG)
+    kwargs = {'Versions': [str(lt.get('Version') or '$Default')]}
+    if lt.get('LaunchTemplateId'):
+        kwargs['LaunchTemplateId'] = lt['LaunchTemplateId']
+    else:
+        kwargs['LaunchTemplateName'] = lt['LaunchTemplateName']
+    versions = ec2_client.describe_launch_template_versions(**kwargs)['LaunchTemplateVersions']
+    if not versions:
+        return None
+    market_options = versions[0].get('LaunchTemplateData', {}).get('InstanceMarketOptions') or {}
+    return 'spot' if market_options.get('MarketType') == 'spot' else 'on-demand'
+
+
 def gather(region, writer):
+    # One region-wide call, not per-ASG (see get_scheduled_actions' own
+    # docstring) — a failure here means "unknown," not "no schedule," so
+    # every ASG's _HasScheduledAction becomes None (indeterminate) rather
+    # than False; scanner-light's asg_notspot check treats None the same
+    # as True (don't fire) rather than guessing it's schedule-free, same
+    # "don't guess" discipline as every other None field here.
+    try:
+        scheduled_action_asg_names = {a['AutoScalingGroupName'] for a in get_scheduled_actions(region)}
+    except Exception as e:
+        scheduled_action_asg_names = None
+        writer.add_error(region, 'autoscaling scheduled actions', str(e))
+
     for asg in get_asgs(region):
+        asg['_HasScheduledAction'] = (
+            None if scheduled_action_asg_names is None
+            else asg.get('AutoScalingGroupName') in scheduled_action_asg_names
+        )
         try:
             asg['_LaunchTemplatePublicIp'] = _launches_with_public_ip(asg, region)
         except Exception as e:
@@ -242,6 +328,12 @@ def gather(region, writer):
             asg['_LaunchTemplateUserdataSecretHits'] = _launch_template_userdata_secret_hits(asg, region)
         except Exception as e:
             asg['_LaunchTemplateUserdataSecretHits'] = []
+            writer.add_error(region, 'autoscaling launch template/configuration lookup',
+                              f"{asg.get('AutoScalingGroupName', asg.get('AutoScalingGroupARN'))}: {e}")
+        try:
+            asg['_LaunchTemplateMarketType'] = _launch_template_market_type(asg, region)
+        except Exception as e:
+            asg['_LaunchTemplateMarketType'] = None
             writer.add_error(region, 'autoscaling launch template/configuration lookup',
                               f"{asg.get('AutoScalingGroupName', asg.get('AutoScalingGroupARN'))}: {e}")
         writer.add_resource(

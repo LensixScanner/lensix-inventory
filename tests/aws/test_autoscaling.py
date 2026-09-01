@@ -7,9 +7,17 @@ import pytest
 import lensix_inventory.aws.autoscaling as m
 
 
-def _asg_client(asgs=None, launch_configs=None):
+def _asg_client(asgs=None, launch_configs=None, scheduled_actions=None):
     client = MagicMock()
-    client.get_paginator.return_value.paginate.return_value = [{'AutoScalingGroups': asgs or []}]
+
+    def _paginator(op, **kw):
+        p = MagicMock()
+        if op == 'describe_auto_scaling_groups':
+            p.paginate.return_value = [{'AutoScalingGroups': asgs or []}]
+        elif op == 'describe_scheduled_actions':
+            p.paginate.return_value = [{'ScheduledUpdateGroupActions': scheduled_actions or []}]
+        return p
+    client.get_paginator.side_effect = _paginator
     client.describe_launch_configurations.return_value = {'LaunchConfigurations': launch_configs or []}
     return client
 
@@ -95,9 +103,10 @@ class TestGather:
         assert asg['_LaunchTemplatePublicIp'] is None
         assert asg['_LaunchTemplateIamRole'] is None
         assert asg['_LaunchTemplateUserdataSecretHits'] == []
-        # All three independent lookups hit the same broken launch template
-        # version, so all three record their own error.
-        assert w.add_error.call_count == 3
+        assert asg['_LaunchTemplateMarketType'] is None
+        # All four independent lookups hit the same broken launch template
+        # version, so all four record their own error.
+        assert w.add_error.call_count == 4
         for args in (c[0] for c in w.add_error.call_args_list):
             assert args[0] == 'us-east-1'
             assert 'web-asg' in args[2] and 'AccessDenied' in args[2]
@@ -140,6 +149,102 @@ class TestGather:
         with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg])}[service]):
             m.gather('us-east-1', w)
         assert asg['_LaunchTemplateUserdataSecretHits'] == []
+
+    def test_attaches_launch_template_market_type_result_to_the_raw_record(self):
+        w = MagicMock()
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'},
+        }
+        lt_version = {'LaunchTemplateData': {'InstanceMarketOptions': {'MarketType': 'spot'}}}
+        with patch.object(m.boto3, 'client', side_effect=_clients(_asg_client([asg]), _ec2_client([lt_version]))):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateMarketType'] == 'spot'
+
+    def test_no_launch_template_means_market_type_is_none(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_LaunchTemplateMarketType'] is None
+
+    def test_has_scheduled_action_true_when_one_targets_this_asg(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        action = {'AutoScalingGroupName': 'web-asg', 'ScheduledActionName': 'scale-up-morning'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg], scheduled_actions=[action])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_HasScheduledAction'] is True
+
+    def test_has_scheduled_action_false_when_none_target_this_asg(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        other_action = {'AutoScalingGroupName': 'other-asg', 'ScheduledActionName': 'scale-up-morning'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg], scheduled_actions=[other_action])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_HasScheduledAction'] is False
+
+    def test_has_scheduled_action_false_with_no_scheduled_actions_at_all(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': _asg_client([asg])}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_HasScheduledAction'] is False
+
+    def test_has_scheduled_action_none_when_the_region_wide_lookup_fails(self):
+        # Region-wide failure means "unknown," not "no schedule" — every
+        # ASG in the region gets None, and a lookup failure here must not
+        # abort the whole region's gather (still gathers the ASG).
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        asg_client = MagicMock()
+
+        def _paginator(op, **kw):
+            if op == 'describe_scheduled_actions':
+                raise RuntimeError('AccessDenied')
+            p = MagicMock()
+            p.paginate.return_value = [{'AutoScalingGroups': [asg]}]
+            return p
+        asg_client.get_paginator.side_effect = _paginator
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': asg_client}[service]):
+            m.gather('us-east-1', w)
+        assert asg['_HasScheduledAction'] is None
+        w.add_resource.assert_called_once()
+        assert any('scheduled actions' in c[0][1] for c in w.add_error.call_args_list)
+
+    def test_scheduled_actions_lookup_is_one_call_for_the_whole_region_not_per_asg(self):
+        w = MagicMock()
+        asg1 = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'asg-1'}
+        asg2 = {'AutoScalingGroupARN': 'arn:2', 'AutoScalingGroupName': 'asg-2'}
+        asg_client = _asg_client([asg1, asg2])
+        with patch.object(m.boto3, 'client', side_effect=lambda service, **kw: {'autoscaling': asg_client}[service]):
+            m.gather('us-east-1', w)
+        scheduled_calls = [c for c in asg_client.get_paginator.call_args_list if c.args[0] == 'describe_scheduled_actions']
+        assert len(scheduled_calls) == 1
+
+
+class TestGetScheduledActions:
+    def test_returns_actions_from_every_page(self):
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.return_value = [
+            {'ScheduledUpdateGroupActions': [{'ScheduledActionName': 'a'}]},
+            {'ScheduledUpdateGroupActions': [{'ScheduledActionName': 'b'}]},
+        ]
+        with patch.object(m.boto3, 'client', return_value=client):
+            actions = m.get_scheduled_actions('us-east-1')
+        assert [a['ScheduledActionName'] for a in actions] == ['a', 'b']
+
+    def test_no_scheduled_actions_returns_empty_list(self):
+        client = MagicMock()
+        client.get_paginator.return_value.paginate.return_value = [{'ScheduledUpdateGroupActions': []}]
+        with patch.object(m.boto3, 'client', return_value=client):
+            assert m.get_scheduled_actions('us-east-1') == []
+
+    def test_lookup_error_propagates(self):
+        client = MagicMock()
+        client.get_paginator.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=client), pytest.raises(RuntimeError, match='boom'):
+            m.get_scheduled_actions('us-east-1')
 
 
 class TestLaunchTemplateSpec:
@@ -279,6 +384,65 @@ class TestLaunchTemplateIamRole:
 
     def test_no_launch_template_or_configuration_returns_none(self):
         assert m._launch_template_iam_role({}, 'us-east-1') is None
+
+
+class TestLaunchTemplateMarketType:
+    def test_launch_configuration_with_spot_price_is_spot(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = _asg_client(launch_configs=[{'SpotPrice': '0.05'}])
+        with patch.object(m.boto3, 'client', return_value=asg_client):
+            assert m._launch_template_market_type(asg, 'us-east-1') == 'spot'
+
+    def test_launch_configuration_without_spot_price_is_on_demand(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = _asg_client(launch_configs=[{}])
+        with patch.object(m.boto3, 'client', return_value=asg_client):
+            assert m._launch_template_market_type(asg, 'us-east-1') == 'on-demand'
+
+    def test_launch_configuration_missing_returns_none(self):
+        asg = {'LaunchConfigurationName': 'lc-gone'}
+        with patch.object(m.boto3, 'client', return_value=_asg_client(launch_configs=[])):
+            assert m._launch_template_market_type(asg, 'us-east-1') is None
+
+    def test_launch_configuration_lookup_error_propagates(self):
+        asg = {'LaunchConfigurationName': 'lc-1'}
+        asg_client = MagicMock()
+        asg_client.describe_launch_configurations.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=asg_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_market_type(asg, 'us-east-1')
+
+    def test_launch_template_with_spot_market_type_is_spot(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        ec2_client = _ec2_client([{'LaunchTemplateData': {'InstanceMarketOptions': {'MarketType': 'spot'}}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_market_type(asg, 'us-east-1') == 'spot'
+        ec2_client.describe_launch_template_versions.assert_called_once_with(
+            Versions=['$Latest'], LaunchTemplateId='lt-1',
+        )
+
+    def test_launch_template_with_no_market_options_is_on_demand(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateName': 'my-lt', 'Version': '2'}}
+        ec2_client = _ec2_client([{'LaunchTemplateData': {}}])
+        with patch.object(m.boto3, 'client', return_value=ec2_client):
+            assert m._launch_template_market_type(asg, 'us-east-1') == 'on-demand'
+        ec2_client.describe_launch_template_versions.assert_called_once_with(
+            Versions=['2'], LaunchTemplateName='my-lt',
+        )
+
+    def test_launch_template_version_not_found_returns_none(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        with patch.object(m.boto3, 'client', return_value=_ec2_client([])):
+            assert m._launch_template_market_type(asg, 'us-east-1') is None
+
+    def test_launch_template_lookup_error_propagates(self):
+        asg = {'LaunchTemplate': {'LaunchTemplateId': 'lt-1', 'Version': '$Latest'}}
+        ec2_client = MagicMock()
+        ec2_client.describe_launch_template_versions.side_effect = RuntimeError('boom')
+        with patch.object(m.boto3, 'client', return_value=ec2_client), pytest.raises(RuntimeError, match='boom'):
+            m._launch_template_market_type(asg, 'us-east-1')
+
+    def test_no_launch_template_or_configuration_returns_none(self):
+        assert m._launch_template_market_type({}, 'us-east-1') is None
 
 
 class TestLaunchTemplateUserdataSecretHits:

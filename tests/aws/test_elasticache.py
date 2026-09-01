@@ -110,3 +110,60 @@ class TestGather:
         assert any(c.kwargs['source'] == 'elasticache (cache clusters)' for c in w.add_error.call_args_list)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert 'elasticache_replication_group' in calls
+
+    def test_a_replication_group_whose_arn_is_protected_is_stamped_true(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:replicationgroup:rg1'
+        rg = {'ReplicationGroupId': 'rg1', 'ARN': arn}
+        client = _ec_client(rg_pages=[{'ReplicationGroups': [rg]}])
+        with patch.object(m, 'get_protected_resource_arns', return_value={arn}):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_replication_group'].kwargs['raw']['_ProtectedByAwsBackup'] is True
+
+    def test_a_replication_group_whose_arn_is_not_protected_is_stamped_false(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:replicationgroup:rg1'
+        rg = {'ReplicationGroupId': 'rg1', 'ARN': arn}
+        client = _ec_client(rg_pages=[{'ReplicationGroups': [rg]}])
+        with patch.object(m, 'get_protected_resource_arns', return_value=set()):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_replication_group'].kwargs['raw']['_ProtectedByAwsBackup'] is False
+
+    def test_a_standalone_cluster_whose_arn_is_protected_is_stamped_true(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:cluster:c1'
+        cluster = {'CacheClusterId': 'c1', 'ARN': arn}
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m, 'get_protected_resource_arns', return_value={arn}):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_cluster'].kwargs['raw']['_ProtectedByAwsBackup'] is True
+
+    def test_a_standalone_cluster_whose_arn_is_not_protected_is_stamped_false(self):
+        w = MagicMock()
+        arn = 'arn:aws:elasticache:us-east-1:1:cluster:c1'
+        cluster = {'CacheClusterId': 'c1', 'ARN': arn}
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m, 'get_protected_resource_arns', return_value=set()):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_cluster'].kwargs['raw']['_ProtectedByAwsBackup'] is False
+
+    def test_a_backup_lookup_failure_stamps_false_on_both_resource_types_and_records_an_error(self):
+        w = MagicMock()
+        rg = {'ReplicationGroupId': 'rg1', 'ARN': 'arn:aws:elasticache:us-east-1:1:replicationgroup:rg1'}
+        cluster = {'CacheClusterId': 'c1', 'ARN': 'arn:aws:elasticache:us-east-1:1:cluster:c1'}
+        client = _ec_client(rg_pages=[{'ReplicationGroups': [rg]}], cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m, 'get_protected_resource_arns', side_effect=RuntimeError('AccessDenied')):
+            with patch.object(m.boto3, 'client', return_value=client):
+                m.gather('us-east-1', w)
+        assert any(c.kwargs['source'] == 'elasticache (aws backup protected resources)' for c in w.add_error.call_args_list)
+        calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
+        assert calls['elasticache_replication_group'].kwargs['raw']['_ProtectedByAwsBackup'] is False
+        assert calls['elasticache_cluster'].kwargs['raw']['_ProtectedByAwsBackup'] is False
