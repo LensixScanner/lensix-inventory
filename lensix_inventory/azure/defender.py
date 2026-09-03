@@ -18,6 +18,12 @@ Both pricing plans and NICs are ordinary listable ARM resources with their
 own id/name, gathered here as `defender_pricing` and `network_interface`
 resources so Lensix can evaluate Defender-related findings server-side
 from an uploaded inventory file.
+
+A third helper, `get_public_ip_addresses()`, lives here too (same
+subscription-wide-list-client pattern as the two above) but is NOT called
+from `gather()` — it exists for `azure/scanmodules/vm_checks.py` to resolve
+the `public_ip_address` *reference* on a NIC's `ip_configurations` (only an
+`.id` on a plain `list_all()` result) to an actual address.
 """
 
 from azure.mgmt.network import NetworkManagementClient
@@ -33,6 +39,11 @@ def get_pricings(credential, subscription_id):
 def get_network_interfaces(credential, subscription_id):
     network_client = NetworkManagementClient(credential, subscription_id)
     return list(network_client.network_interfaces.list_all())
+
+
+def get_public_ip_addresses(credential, subscription_id):
+    network_client = NetworkManagementClient(credential, subscription_id)
+    return list(network_client.public_ip_addresses.list_all())
 
 
 def gather(credential, subscription_id, writer):

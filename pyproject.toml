@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lensix-inventory"
-version = "0.7.2"
+version = "0.7.3"
 description = "Gather an AWS/Azure/GCP account inventory and upload it to Lensix, or self-host as a scheduled container — without ever giving Lensix live access to your cloud account."
 readme = "README.md"
 requires-python = ">=3.9"
