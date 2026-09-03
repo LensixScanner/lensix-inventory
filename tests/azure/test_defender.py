@@ -11,6 +11,8 @@ securitycenter's security_contact — only network_interface is taggable.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import lensix_inventory.azure.defender as m
 
 
@@ -19,6 +21,14 @@ def _pricing(rid='/subscriptions/s1/providers/Microsoft.Security/pricings/Virtua
     pricing.id = rid
     pricing.name = name
     return pricing
+
+
+def _public_ip(rid='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/publicIPAddresses/pip1',
+               ip_address='1.2.3.4'):
+    pip = MagicMock()
+    pip.id = rid
+    pip.properties = MagicMock(ip_address=ip_address)
+    return pip
 
 
 def _nic(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/networkInterfaces/nic1',
@@ -95,3 +105,35 @@ class TestGather:
              patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGetPublicIpAddresses:
+    """Not called from gather() itself — see the module docstring. Mirrors
+    TestGetScheduledActions's own happy/empty/error-propagates shape
+    (lensix-inventory/tests/aws/test_autoscaling.py) for a new subscription-
+    wide lookup function."""
+
+    def test_returns_addresses_from_the_listing(self):
+        network = MagicMock()
+        network.public_ip_addresses.list_all.return_value = iter([
+            _public_ip(rid='pip-1', ip_address='1.1.1.1'),
+            _public_ip(rid='pip-2', ip_address='2.2.2.2'),
+        ])
+        with patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            result = m.get_public_ip_addresses('cred', 'sub-1')
+        assert [(p.id, p.properties.ip_address) for p in result] == [
+            ('pip-1', '1.1.1.1'), ('pip-2', '2.2.2.2'),
+        ]
+
+    def test_no_public_ips_returns_empty_list(self):
+        network = MagicMock()
+        network.public_ip_addresses.list_all.return_value = iter([])
+        with patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            assert m.get_public_ip_addresses('cred', 'sub-1') == []
+
+    def test_lookup_error_propagates(self):
+        network = MagicMock()
+        network.public_ip_addresses.list_all.side_effect = RuntimeError('boom')
+        with patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network), \
+             pytest.raises(RuntimeError, match='boom'):
+            m.get_public_ip_addresses('cred', 'sub-1')
