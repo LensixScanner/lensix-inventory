@@ -27,8 +27,8 @@ from ..common.output import InventoryWriter
 from . import (
     account, acm, apigateway, athena, autoscaling, cicd, cloudfront, cost,
     dnsinventory, documentdb, dynamodb, ebs, ec2, ecr, ecs, efs, eks,
-    elasticache, elasticsearch, emr, glue, kinesis, lambda_, lb, mq, msk,
-    neptune, network, rds, redshift, reserved_instances, route53, s3,
+    elasticache, elasticsearch, emr, fsx, glue, kinesis, lambda_, lb, mq,
+    msk, neptune, network, rds, redshift, reserved_instances, route53, s3,
     sagemaker, savingsplans, secretsmanager, sg, sns, sqs, ssm, transfer,
     user, vpc, workspaces,
 )
@@ -52,6 +52,7 @@ REGIONAL_MODULES = [
     ('elasticache', elasticache.gather),
     ('elasticsearch', elasticsearch.gather),
     ('emr', emr.gather),
+    ('fsx', fsx.gather),
     ('glue', glue.gather),
     ('kinesis', kinesis.gather),
     ('lambda', lambda_.gather),
