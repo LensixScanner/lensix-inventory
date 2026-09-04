@@ -27,9 +27,10 @@ from ..common.output import InventoryWriter
 from . import (
     account, acm, apigateway, athena, autoscaling, cicd, cloudfront, cost,
     dnsinventory, documentdb, dynamodb, ebs, ec2, ecr, ecs, efs, eks,
-    elasticache, elasticsearch, emr, glue, kinesis, lambda_, lb, mq, msk,
-    neptune, network, rds, redshift, route53, s3, sagemaker,
-    secretsmanager, sg, sns, sqs, ssm, transfer, user, vpc, workspaces,
+    elasticache, elasticsearch, emr, fsx, glue, kinesis, lambda_, lb, mq,
+    msk, neptune, network, rds, redshift, reserved_instances, route53, s3,
+    sagemaker, savingsplans, secretsmanager, sg, sns, sqs, ssm, transfer,
+    user, vpc, workspaces,
 )
 from .session import get_account_id, get_regions
 
@@ -51,6 +52,7 @@ REGIONAL_MODULES = [
     ('elasticache', elasticache.gather),
     ('elasticsearch', elasticsearch.gather),
     ('emr', emr.gather),
+    ('fsx', fsx.gather),
     ('glue', glue.gather),
     ('kinesis', kinesis.gather),
     ('lambda', lambda_.gather),
@@ -61,6 +63,7 @@ REGIONAL_MODULES = [
     ('network', network.gather),
     ('rds', rds.gather),
     ('redshift', redshift.gather),
+    ('reserved_instances', reserved_instances.gather),
     ('sagemaker', sagemaker.gather),
     ('secretsmanager', secretsmanager.gather),
     ('sg', sg.gather),
@@ -76,6 +79,7 @@ GLOBAL_MODULES = [
     ('cloudfront', cloudfront.gather),
     ('dnsinventory', dnsinventory.gather),
     ('route53', route53.gather),
+    ('savingsplans', savingsplans.gather),
     ('user', user.gather),
 ]
 
