@@ -6,6 +6,14 @@ values redacted).
 plaintext-secrets evaluation is left server-side, computed from the
 uploaded data.
 
+Each cluster's services (`get_service_arns`/`describe_services`) are a
+second fan-out, fused into the cluster's own raw record as `_Services` --
+same pattern as redshift.py's `_LoggingStatus`. Only a Fargate/awsvpc-mode
+service's `networkConfiguration` actually carries anything (subnet/
+security-group ids); EC2 bridge/host-mode services simply have none.
+Isolated per-cluster via writer.add_error() so one cluster's failure
+doesn't lose every other cluster's data.
+
 **Secrets exception**: environment variable *values* are exactly the kind
 of field this tool's design principle (see README) requires redacting
 locally, so they're scanned with `scan_text_for_secrets` before upload.
@@ -44,6 +52,24 @@ def describe_clusters(region, arns):
         resp = ecs.describe_clusters(clusters=batch, include=['SETTINGS', 'TAGS'])
         clusters.extend(resp['clusters'])
     return clusters
+
+
+def get_service_arns(region, cluster_arn):
+    ecs = boto3.client('ecs', region_name=region)
+    arns = []
+    for page in ecs.get_paginator('list_services').paginate(cluster=cluster_arn):
+        arns.extend(page.get('serviceArns', []))
+    return arns
+
+
+def describe_services(region, cluster_arn, service_arns):
+    ecs = boto3.client('ecs', region_name=region)
+    services = []
+    for i in range(0, len(service_arns), 10):
+        batch = service_arns[i:i + 10]
+        resp = ecs.describe_services(cluster=cluster_arn, services=batch)
+        services.extend(resp.get('services', []))
+    return services
 
 
 def get_task_definition_families(region):
@@ -97,11 +123,34 @@ def gather(region, writer):
             clusters = []
         for cluster in clusters:
             cluster_arn = cluster['clusterArn']
-            writer.add_resource(
+            raw = dict(cluster)
+            try:
+                service_arns = get_service_arns(region, cluster_arn)
+                raw['_Services'] = describe_services(region, cluster_arn, service_arns) if service_arns else []
+            except Exception as e:
+                writer.add_error(region=region, source=f'ecs_cluster:{cluster_arn} (services)', message=e)
+                raw['_Services'] = []
+            recorded = writer.add_resource(
                 resource_type='ecs_cluster', region=region, resource_id=cluster_arn,
-                resource_name=cluster_arn.split('/')[-1], raw=cluster,
+                resource_name=cluster_arn.split('/')[-1], raw=raw,
                 tags=cluster.get('tags'),
             )
+            if not recorded:
+                continue
+            # Only a Fargate/awsvpc network-mode service's own
+            # networkConfiguration carries anything; EC2 bridge/host-mode
+            # services have none. Attributed to the cluster (already a
+            # persisted resource) rather than inventing a new ecs_service
+            # resource type just for this.
+            subnet_ids, sg_ids = set(), set()
+            for svc in raw['_Services']:
+                awsvpc = (svc.get('networkConfiguration') or {}).get('awsvpcConfiguration') or {}
+                subnet_ids.update(awsvpc.get('subnets', []))
+                sg_ids.update(awsvpc.get('securityGroups', []))
+            for subnet_id in subnet_ids:
+                writer.add_edge(from_type='ecs_cluster', from_id=cluster_arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            for sg_id in sg_ids:
+                writer.add_edge(from_type='ecs_cluster', from_id=cluster_arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
 
     try:
         families = get_task_definition_families(region)

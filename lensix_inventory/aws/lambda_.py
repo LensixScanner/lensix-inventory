@@ -187,15 +187,25 @@ def gather(region, writer):
             raw['_RoleExists'] = None
             raw['_RoleHasAdminPrivileges'] = None
 
-        vpc_id = fn.get('VpcConfig', {}).get('VpcId') or None
+        vpc_config = fn.get('VpcConfig') or {}
+        vpc_id = vpc_config.get('VpcId') or None
+        fn_arn = fn['FunctionArn']
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='lambda_function',
             region=region,
-            resource_id=fn['FunctionArn'],
+            resource_id=fn_arn,
             resource_name=name,
             scope_id=vpc_id,
             raw=raw,
             secret_scan_hits=secret_hits,
-            tags=get_function_tags(region, fn['FunctionArn']),
+            tags=get_function_tags(region, fn_arn),
         )
+        if not recorded:
+            continue
+        if vpc_id:
+            writer.add_edge(from_type='lambda_function', from_id=fn_arn, to_type='vpc', to_id=vpc_id, relationship='in_vpc')
+        for sg_id in vpc_config.get('SecurityGroupIds', []):
+            writer.add_edge(from_type='lambda_function', from_id=fn_arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        for subnet_id in vpc_config.get('SubnetIds', []):
+            writer.add_edge(from_type='lambda_function', from_id=fn_arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

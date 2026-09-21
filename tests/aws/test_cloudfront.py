@@ -21,6 +21,31 @@ def _cf_client(dists, config_by_id=None, config_error_ids=None, tags_by_arn=None
     return client
 
 
+class TestExtractBucketName:
+    def test_matches_the_regional_form(self):
+        assert m._extract_bucket_name('mybucket.s3.us-east-1.amazonaws.com') == 'mybucket'
+
+    def test_matches_the_legacy_global_form(self):
+        assert m._extract_bucket_name('mybucket.s3.amazonaws.com') == 'mybucket'
+
+    def test_matches_the_website_hyphen_form(self):
+        assert m._extract_bucket_name('mybucket.s3-website-us-east-1.amazonaws.com') == 'mybucket'
+
+    def test_no_match_for_a_non_s3_domain(self):
+        assert m._extract_bucket_name('example.com') is None
+
+
+class TestIsS3Origin:
+    def test_true_for_an_s3_origin_config(self):
+        assert m._is_s3_origin({'S3OriginConfig': {}}) is True
+
+    def test_false_for_a_custom_origin_config(self):
+        assert m._is_s3_origin({'CustomOriginConfig': {}}) is False
+
+    def test_false_when_both_are_somehow_present(self):
+        assert m._is_s3_origin({'S3OriginConfig': {}, 'CustomOriginConfig': {}}) is False
+
+
 class TestGather:
     def test_adds_one_resource_with_the_config_merged_in(self):
         w = MagicMock()
@@ -75,6 +100,53 @@ class TestGather:
         with patch.object(m.boto3, 'client', return_value=client):
             m.gather(w)
         assert '_DistributionConfig' not in dist
+
+    def test_an_s3_origin_produces_a_routes_to_edge(self):
+        w = MagicMock()
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net'}
+        config = {'Origins': {'Items': [{'DomainName': 'mybucket.s3.amazonaws.com', 'S3OriginConfig': {}}]}}
+        client = _cf_client([dist], config_by_id={'E123': config})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        w.add_edge.assert_called_once_with(
+            from_type='cloudfront_distribution', from_id='E123',
+            to_type='s3_bucket', to_id='mybucket', relationship='routes_to',
+        )
+
+    def test_a_custom_origin_produces_no_edge(self):
+        w = MagicMock()
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net'}
+        config = {'Origins': {'Items': [{'DomainName': 'example.com', 'CustomOriginConfig': {}}]}}
+        client = _cf_client([dist], config_by_id={'E123': config})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        w.add_edge.assert_not_called()
+
+    def test_no_origins_produces_no_edge(self):
+        w = MagicMock()
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net'}
+        client = _cf_client([dist], config_by_id={'E123': {}})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        w.add_edge.assert_not_called()
+
+    def test_a_config_fetch_failure_produces_no_edge(self):
+        w = MagicMock()
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net'}
+        client = _cf_client([dist], config_error_ids={'E123'})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_distribution_produces_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        dist = {'Id': 'E123', 'DomainName': 'd123.cloudfront.net'}
+        config = {'Origins': {'Items': [{'DomainName': 'mybucket.s3.amazonaws.com', 'S3OriginConfig': {}}]}}
+        client = _cf_client([dist], config_by_id={'E123': config})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather(w)
+        w.add_edge.assert_not_called()
 
     def test_no_distributions_gathers_nothing(self):
         w = MagicMock()

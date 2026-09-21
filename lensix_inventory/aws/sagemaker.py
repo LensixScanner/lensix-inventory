@@ -53,7 +53,7 @@ def gather(region, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'sagemaker_notebook:{arn}', message=e)
             continue
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='sagemaker_notebook',
             region=region,
             resource_id=arn,
@@ -61,3 +61,11 @@ def gather(region, writer):
             raw=detail,
             tags=get_notebook_tags(region, arn),
         )
+        if not recorded:
+            continue
+        # No VpcId is directly exposed; the subnet edge reaches it
+        # transitively via vpc.py's own subnet -> vpc edge.
+        if detail.get('SubnetId'):
+            writer.add_edge(from_type='sagemaker_notebook', from_id=arn, to_type='subnet', to_id=detail['SubnetId'], relationship='in_subnet')
+        for sg_id in detail.get('SecurityGroups', []):
+            writer.add_edge(from_type='sagemaker_notebook', from_id=arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

@@ -189,6 +189,29 @@ class TestAddResourceTagSuppression:
                         resource_name='i-1', raw={'InstanceId': 'i-1'}, tags={'lensix-suppress': 'true'})
         assert w.records == []
 
+    def test_returns_false_for_a_fully_suppressed_resource(self):
+        # Gather functions that also add_edge() for this same resource
+        # check this return value first (see add_edge()'s own docstring)
+        # -- a fully-suppressed resource must never leak an edge either.
+        w = _writer()
+        recorded = w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                                   resource_name='i-1', raw={}, tags={'lensix-suppress': 'true'})
+        assert recorded is False
+
+    def test_returns_true_for_a_normally_recorded_resource(self):
+        w = _writer()
+        recorded = w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                                   resource_name='i-1', raw={})
+        assert recorded is True
+
+    def test_returns_true_for_a_per_check_suppressed_resource(self):
+        # Only full suppression skips recording -- a resource with just
+        # lensix-suppress-checks is still recorded normally.
+        w = _writer()
+        recorded = w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
+                                   resource_name='i-1', raw={}, tags={'lensix-suppress-checks': 'ec2_public_ip'})
+        assert recorded is True
+
     def test_fully_suppressed_resource_does_not_count_toward_resource_counts(self):
         w = _writer()
         w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
@@ -270,6 +293,40 @@ class TestAddResourceTagSuppression:
         assert len(w.tag_suppressions) == 1
 
 
+class TestAddEdge:
+    def test_records_an_edge(self):
+        w = _writer()
+        w.add_edge(from_type='ec2_instance', from_id='i-1', to_type='subnet', to_id='subnet-1', relationship='in_subnet')
+        assert w.edges == [{
+            'from_type': 'ec2_instance', 'from_id': 'i-1',
+            'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet',
+        }]
+
+    def test_edges_accumulate_in_call_order(self):
+        w = _writer()
+        w.add_edge(from_type='a', from_id='1', to_type='vpc', to_id='v1', relationship='in_vpc')
+        w.add_edge(from_type='b', from_id='2', to_type='vpc', to_id='v1', relationship='in_vpc')
+        assert [e['from_type'] for e in w.edges] == ['a', 'b']
+
+    def test_edges_property_returns_a_copy(self):
+        w = _writer()
+        w.add_edge(from_type='a', from_id='1', to_type='vpc', to_id='v1', relationship='in_vpc')
+        snapshot = w.edges
+        snapshot.append({'fake': True})
+        assert len(w.edges) == 1
+
+    def test_no_resources_added_yet_does_not_prevent_recording_an_edge(self):
+        # add_edge() doesn't validate either endpoint was add_resource()'d
+        # -- persist_resource_edges() downstream already tolerates an
+        # edge whose endpoint was never persisted (silently unusable, not
+        # an error), and the "to" endpoint is very often a resource type
+        # a different gather() function owns entirely.
+        w = _writer()
+        w.add_edge(from_type='ec2_instance', from_id='i-1', to_type='vpc', to_id='vpc-1', relationship='in_vpc')
+        assert len(w.edges) == 1
+        assert w.records == []
+
+
 class TestAddError:
     def test_records_an_error(self):
         w = _writer()
@@ -333,10 +390,11 @@ class TestWrite:
         with gzip.open(path, 'rt', encoding='utf-8') as f:
             return [json.loads(line) for line in f if line.strip()]
 
-    def test_writes_manifest_then_records_then_errors(self, tmp_path):
+    def test_writes_manifest_then_records_then_edges_then_errors(self, tmp_path):
         w = _writer()
         w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1',
                         resource_name='web-1', raw={'InstanceId': 'i-1'})
+        w.add_edge(from_type='ec2_instance', from_id='i-1', to_type='subnet', to_id='subnet-1', relationship='in_subnet')
         w.add_error(region='us-west-2', source='ec2 (instances)', message='boom')
         path = tmp_path / 'out.ndjson.gz'
         manifest = w.write(str(path))
@@ -345,14 +403,18 @@ class TestWrite:
         assert lines[0]['kind'] == 'manifest'
         assert lines[1]['kind'] == 'resource'
         assert lines[1]['resource_id'] == 'i-1'
-        assert lines[2]['kind'] == 'error'
-        assert lines[2]['source'] == 'ec2 (instances)'
+        assert lines[2]['kind'] == 'edge'
+        assert lines[2]['from_id'] == 'i-1'
+        assert lines[2]['relationship'] == 'in_subnet'
+        assert lines[3]['kind'] == 'error'
+        assert lines[3]['source'] == 'ec2 (instances)'
         assert manifest == lines[0]
 
     def test_manifest_fields(self, tmp_path):
         w = _writer()
         w.add_resource(resource_type='ec2_instance', region='us-east-1', resource_id='i-1', resource_name='i-1', raw={})
         w.add_resource(resource_type='s3_bucket', region='us-west-2', resource_id='b-1', resource_name='b-1', raw={})
+        w.add_edge(from_type='ec2_instance', from_id='i-1', to_type='vpc', to_id='vpc-1', relationship='in_vpc')
         w.add_error(region='global', source='x', message='boom')
         path = tmp_path / 'out.ndjson.gz'
         manifest = w.write(str(path))
@@ -364,6 +426,7 @@ class TestWrite:
         assert manifest['regions'] == ['us-east-1', 'us-west-2']
         assert manifest['resource_counts'] == {'ec2_instance': 1, 's3_bucket': 1}
         assert manifest['total_resources'] == 2
+        assert manifest['total_edges'] == 1
         assert manifest['error_count'] == 1
         # generated_at must be a real, parseable ISO-8601 timestamp.
         datetime.fromisoformat(manifest['generated_at'])
@@ -373,6 +436,7 @@ class TestWrite:
         path = tmp_path / 'out.ndjson.gz'
         manifest = w.write(str(path))
         assert manifest['total_resources'] == 0
+        assert manifest['total_edges'] == 0
         assert manifest['regions'] == []
         assert self._read_lines(str(path)) == [manifest]
 

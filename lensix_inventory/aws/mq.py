@@ -37,12 +37,21 @@ def gather(region, writer):
             writer.add_error(region=region, source=f'mq_broker:{broker_id}', message=e)
             continue
 
-        writer.add_resource(
+        arn = broker.get('BrokerArn', broker_id)
+        recorded = writer.add_resource(
             resource_type='mq_broker',
             region=region,
-            resource_id=broker.get('BrokerArn', broker_id),
+            resource_id=arn,
             resource_name=broker_name,
             raw=broker,
             # MQ's own Tags field is already a flat {key: value} map.
             tags=broker.get('Tags'),
         )
+        if not recorded:
+            continue
+        # No VpcId is ever exposed directly; subnet edges reach it
+        # transitively via vpc.py's own subnet -> vpc edge.
+        for subnet_id in broker.get('SubnetIds', []):
+            writer.add_edge(from_type='mq_broker', from_id=arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+        for sg_id in broker.get('SecurityGroups', []):
+            writer.add_edge(from_type='mq_broker', from_id=arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

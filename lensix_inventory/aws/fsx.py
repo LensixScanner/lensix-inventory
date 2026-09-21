@@ -35,12 +35,20 @@ def _fs_name(fs):
 
 def gather(region, writer):
     for fs in get_file_systems(region):
-        writer.add_resource(
+        fs_id = fs.get('ResourceARN') or fs['FileSystemId']
+        vpc_id = fs.get('VpcId')
+        recorded = writer.add_resource(
             resource_type='fsx_file_system',
             region=region,
-            resource_id=fs.get('ResourceARN') or fs['FileSystemId'],
+            resource_id=fs_id,
             resource_name=_fs_name(fs),
-            scope_id=fs.get('VpcId'),
+            scope_id=vpc_id,
             raw=fs,
             tags=fs.get('Tags'),
         )
+        if not recorded:
+            continue
+        if vpc_id:
+            writer.add_edge(from_type='fsx_file_system', from_id=fs_id, to_type='vpc', to_id=vpc_id, relationship='in_vpc')
+        for subnet_id in fs.get('SubnetIds', []):
+            writer.add_edge(from_type='fsx_file_system', from_id=fs_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

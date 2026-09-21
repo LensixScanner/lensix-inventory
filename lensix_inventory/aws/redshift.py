@@ -85,7 +85,7 @@ def gather(region, writer):
             False if protected_arns is None else cluster.get('ClusterNamespaceArn') in protected_arns
         )
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='redshift_cluster',
             region=region,
             resource_id=resource_id,
@@ -94,3 +94,10 @@ def gather(region, writer):
             raw=raw,
             tags=cluster.get('Tags'),
         )
+        if not recorded:
+            continue
+        if cluster.get('VpcId'):
+            writer.add_edge(from_type='redshift_cluster', from_id=resource_id, to_type='vpc', to_id=cluster['VpcId'], relationship='in_vpc')
+        for sg in cluster.get('VpcSecurityGroups', []):
+            if sg.get('VpcSecurityGroupId'):
+                writer.add_edge(from_type='redshift_cluster', from_id=resource_id, to_type='security_group', to_id=sg['VpcSecurityGroupId'], relationship='member_of_sg')

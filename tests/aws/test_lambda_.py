@@ -179,6 +179,32 @@ class TestGather:
         _, kwargs = w.add_resource.call_args
         assert kwargs['scope_id'] is None
 
+    def test_a_vpc_attached_function_produces_vpc_security_group_and_subnet_edges(self):
+        w = MagicMock()
+        fn = _fn(VpcConfig={'VpcId': 'vpc-1', 'SecurityGroupIds': ['sg-1'], 'SubnetIds': ['subnet-1', 'subnet-2']})
+        with patch.object(m.boto3, 'client', side_effect=_client_for([fn])):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'lambda_function', 'from_id': fn['FunctionArn'], 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'lambda_function', 'from_id': fn['FunctionArn'], 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'lambda_function', 'from_id': fn['FunctionArn'], 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'lambda_function', 'from_id': fn['FunctionArn'], 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+
+    def test_a_non_vpc_function_produces_no_edges(self):
+        w = MagicMock()
+        fn = _fn()
+        with patch.object(m.boto3, 'client', side_effect=_client_for([fn])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_function_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        fn = _fn(VpcConfig={'VpcId': 'vpc-1', 'SecurityGroupIds': ['sg-1']})
+        with patch.object(m.boto3, 'client', side_effect=_client_for([fn])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_function_with_no_environment_block_is_unaffected(self):
         w = MagicMock()
         fn = _fn()

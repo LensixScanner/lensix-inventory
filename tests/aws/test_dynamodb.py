@@ -138,6 +138,31 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['dax_cluster'].kwargs['tags'] == tags
 
+    def test_a_dax_cluster_produces_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'ClusterName': 'cache1', 'ClusterArn': 'arn:1', 'SecurityGroups': [{'SecurityGroupIdentifier': 'sg-1'}]}
+        client = _client(dax_clusters=[cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert {'from_type': 'dax_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_a_dax_cluster_with_no_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'ClusterName': 'cache1', 'ClusterArn': 'arn:1'}
+        client = _client(dax_clusters=[cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_dax_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'ClusterName': 'cache1', 'ClusterArn': 'arn:1', 'SecurityGroups': [{'SecurityGroupIdentifier': 'sg-1'}]}
+        client = _client(dax_clusters=[cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_tables_failure_does_not_prevent_dax_clusters_from_being_gathered(self):
         w = MagicMock()
         cluster = {'ClusterName': 'cache1'}

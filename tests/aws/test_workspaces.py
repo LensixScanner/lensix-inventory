@@ -164,6 +164,28 @@ class TestGather:
         types = {c.kwargs['resource_type'] for c in w.add_resource.call_args_list}
         assert types == {'workspace', 'workspaces_ip_group'}
 
+    def test_a_workspace_with_a_subnet_id_produces_a_subnet_edge(self):
+        w = MagicMock()
+        ws = {'WorkspaceId': 'ws-1', 'SubnetId': 'subnet-1'}
+        with patch.object(m.boto3, 'client', return_value=_client(workspaces=[ws])):
+            m.gather('us-east-1', w)
+        assert {'from_type': 'workspace', 'from_id': 'ws-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_a_workspace_with_no_subnet_id_produces_no_edge(self):
+        w = MagicMock()
+        ws = {'WorkspaceId': 'ws-1'}
+        with patch.object(m.boto3, 'client', return_value=_client(workspaces=[ws])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_workspace_produces_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        ws = {'WorkspaceId': 'ws-1', 'SubnetId': 'subnet-1'}
+        with patch.object(m.boto3, 'client', return_value=_client(workspaces=[ws])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_no_ip_groups_or_directories_gathers_nothing_for_them(self):
         w = MagicMock()
         with patch.object(m.boto3, 'client', return_value=_client()):

@@ -10,7 +10,8 @@ import lensix_inventory.aws.apigateway as m
 def _clients(rest_apis=None, rest_apis_raise=False, stages_by_api=None, stages_error_apis=None,
              http_apis=None, http_apis_raise=False, http_stages_by_api=None, http_stages_error_apis=None,
              v1_domains=None, v1_domains_raise=False, v2_domains=None, v2_domains_raise=False,
-             web_acl_by_stage_arn=None, web_acl_not_found_arns=None, web_acl_error_arns=None):
+             web_acl_by_stage_arn=None, web_acl_not_found_arns=None, web_acl_error_arns=None,
+             vpc_links=None, vpc_links_raise=False, vpc_links_pages=None):
     apigw = MagicMock()
 
     def _apigw_paginator(op_name):
@@ -59,6 +60,17 @@ def _clients(rest_apis=None, rest_apis_raise=False, stages_by_api=None, stages_e
                 p.paginate.return_value = [{'Items': v2_domains or []}]
         return p
     apigwv2.get_paginator.side_effect = _apigwv2_paginator
+
+    # get_vpc_links() isn't paginator-based (apigatewayv2 registers no
+    # paginator for it -- see get_vpc_links()'s own docstring), manually
+    # NextToken-looped instead. vpc_links_pages lets a test exercise that
+    # loop directly; the plain vpc_links param is a one-page shortcut.
+    if vpc_links_raise:
+        apigwv2.get_vpc_links.side_effect = RuntimeError('boom')
+    elif vpc_links_pages is not None:
+        apigwv2.get_vpc_links.side_effect = list(vpc_links_pages)
+    else:
+        apigwv2.get_vpc_links.return_value = {'Items': vpc_links or []}
 
     wafv2 = MagicMock()
     web_acl_by_stage_arn = web_acl_by_stage_arn or {}
@@ -183,6 +195,31 @@ class TestGather:
         calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_domain']
         assert calls[0].kwargs['raw']['_ApiType'] == 'HTTP'
 
+    def test_a_private_rest_api_produces_a_vpc_endpoint_edge(self):
+        w = MagicMock()
+        api = {'id': 'a1', 'name': 'my-api', 'endpointConfiguration': {'types': ['PRIVATE'], 'vpcEndpointIds': ['vpce-1']}}
+        client_fn = _clients(rest_apis=[api])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        assert {'from_type': 'apigw_rest_api', 'from_id': 'a1', 'to_type': 'vpc_endpoint', 'to_id': 'vpce-1', 'relationship': 'via_vpc_endpoint'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_a_regional_rest_api_produces_no_vpc_endpoint_edge(self):
+        w = MagicMock()
+        api = {'id': 'a1', 'name': 'my-api', 'endpointConfiguration': {'types': ['REGIONAL']}}
+        client_fn = _clients(rest_apis=[api])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_rest_api_produces_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        api = {'id': 'a1', 'name': 'my-api', 'endpointConfiguration': {'vpcEndpointIds': ['vpce-1']}}
+        client_fn = _clients(rest_apis=[api])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_rest_api_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
         api = {'id': 'a1', 'name': 'my-api', 'tags': {'lensix-suppress': 'true'}}
@@ -239,14 +276,80 @@ class TestGather:
         calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_domain']
         assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}
 
-    def test_each_of_the_four_top_level_fetches_is_isolated_from_the_others(self):
+    def test_each_of_the_five_top_level_fetches_is_isolated_from_the_others(self):
         w = MagicMock()
-        client_fn = _clients(rest_apis_raise=True, http_apis_raise=True, v1_domains_raise=True, v2_domains_raise=True)
+        client_fn = _clients(rest_apis_raise=True, http_apis_raise=True, v1_domains_raise=True, v2_domains_raise=True, vpc_links_raise=True)
         with patch.object(m.boto3, 'client', side_effect=client_fn):
             m.gather('us-east-1', w)
         sources = {c.kwargs['source'] for c in w.add_error.call_args_list}
         assert sources == {
             'apigateway (rest apis)', 'apigateway (http apis)',
-            'apigateway (v1 domains)', 'apigateway (v2 domains)',
+            'apigateway (v1 domains)', 'apigateway (v2 domains)', 'apigateway (vpc links)',
         }
         w.add_resource.assert_not_called()
+
+    def test_adds_one_resource_per_vpc_link(self):
+        w = MagicMock()
+        link = {'VpcLinkId': 'vpcl-1', 'Name': 'my-link', 'SubnetIds': ['subnet-1'], 'SecurityGroupIds': ['sg-1']}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_vpc_link']
+        assert calls[0].kwargs['resource_id'] == 'vpcl-1'
+        assert calls[0].kwargs['resource_name'] == 'my-link'
+        assert calls[0].kwargs['raw'] == link
+
+    def test_vpc_link_falls_back_to_its_id_when_unnamed(self):
+        w = MagicMock()
+        link = {'VpcLinkId': 'vpcl-1'}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_vpc_link']
+        assert calls[0].kwargs['resource_name'] == 'vpcl-1'
+
+    def test_get_vpc_links_paginates_via_nexttoken(self):
+        pages = [
+            {'Items': [{'VpcLinkId': 'vpcl-1'}], 'NextToken': 'tok'},
+            {'Items': [{'VpcLinkId': 'vpcl-2'}]},
+        ]
+        client_fn = _clients(vpc_links_pages=pages)
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            assert {link['VpcLinkId'] for link in m.get_vpc_links('us-east-1')} == {'vpcl-1', 'vpcl-2'}
+
+    def test_a_vpc_link_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        link = {'VpcLinkId': 'vpcl-1', 'SubnetIds': ['subnet-1', 'subnet-2'], 'SecurityGroupIds': ['sg-1']}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'apigw_vpc_link', 'from_id': 'vpcl-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'apigw_vpc_link', 'from_id': 'vpcl-1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'apigw_vpc_link', 'from_id': 'vpcl-1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_vpc_link_with_no_subnets_or_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        link = {'VpcLinkId': 'vpcl-1'}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_vpc_link_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        link = {'VpcLinkId': 'vpcl-1', 'SubnetIds': ['subnet-1']}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_vpc_link_tags_are_passed_through_for_suppression(self):
+        w = MagicMock()
+        link = {'VpcLinkId': 'vpcl-1', 'Tags': {'lensix-suppress': 'true'}}
+        client_fn = _clients(vpc_links=[link])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        calls = [c for c in w.add_resource.call_args_list if c.kwargs['resource_type'] == 'apigw_vpc_link']
+        assert calls[0].kwargs['tags'] == {'lensix-suppress': 'true'}

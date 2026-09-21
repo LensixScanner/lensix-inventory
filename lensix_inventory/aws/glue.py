@@ -88,7 +88,7 @@ def gather(region, writer):
         for conn in get_connections(region):
             name = conn.get('Name', '')
             raw, secret_hits = _redact_connection(conn)
-            writer.add_resource(
+            recorded = writer.add_resource(
                 resource_type='glue_connection',
                 region=region,
                 resource_id=name,
@@ -96,6 +96,15 @@ def gather(region, writer):
                 raw=raw,
                 secret_scan_hits=secret_hits,
             )
+            if not recorded:
+                continue
+            # No VpcId is directly exposed; the subnet edge reaches it
+            # transitively via vpc.py's own subnet -> vpc edge.
+            phys = conn.get('PhysicalConnectionRequirements') or {}
+            if phys.get('SubnetId'):
+                writer.add_edge(from_type='glue_connection', from_id=name, to_type='subnet', to_id=phys['SubnetId'], relationship='in_subnet')
+            for sg_id in phys.get('SecurityGroupIdList', []):
+                writer.add_edge(from_type='glue_connection', from_id=name, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
     except Exception as e:
         writer.add_error(region=region, source='glue (connections)', message=e)
 

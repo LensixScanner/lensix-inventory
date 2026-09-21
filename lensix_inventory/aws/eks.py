@@ -30,15 +30,29 @@ def gather(region, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'eks_cluster:{name}', message=e)
             continue
-        writer.add_resource(
+        cluster_id = cluster.get('arn', name)
+        vpc_config = cluster.get('resourcesVpcConfig', {}) or {}
+        vpc_id = vpc_config.get('vpcId')
+        recorded = writer.add_resource(
             resource_type='eks_cluster',
             region=region,
-            resource_id=cluster.get('arn', name),
+            resource_id=cluster_id,
             resource_name=name,
-            scope_id=cluster.get('resourcesVpcConfig', {}).get('vpcId'),
+            scope_id=vpc_id,
             raw=cluster,
             # Unlike ECS, EKS's own describe_cluster response already
             # includes tags inline — as a flat {key: value} map, not a
             # list, and no extra API call needed.
             tags=cluster.get('tags'),
         )
+        if not recorded:
+            continue
+        if vpc_id:
+            writer.add_edge(from_type='eks_cluster', from_id=cluster_id, to_type='vpc', to_id=vpc_id, relationship='in_vpc')
+        sg_ids = set(vpc_config.get('securityGroupIds', []))
+        if vpc_config.get('clusterSecurityGroupId'):
+            sg_ids.add(vpc_config['clusterSecurityGroupId'])
+        for sg_id in sg_ids:
+            writer.add_edge(from_type='eks_cluster', from_id=cluster_id, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        for subnet_id in vpc_config.get('subnetIds', []):
+            writer.add_edge(from_type='eks_cluster', from_id=cluster_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

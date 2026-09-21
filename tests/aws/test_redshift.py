@@ -85,6 +85,33 @@ class TestGather:
         assert kwargs['raw']['_LoggingStatus'] == {'LoggingEnabled': True}
         assert kwargs['raw']['_SSLParameters']['pg-1']['ParameterName'] == 'require_ssl'
 
+    def test_a_cluster_produces_vpc_and_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'ClusterIdentifier': 'c1', 'VpcId': 'vpc-1', 'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1'}]}
+        client = _redshift_client([cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'redshift_cluster', 'from_id': 'c1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'redshift_cluster', 'from_id': 'c1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_cluster_with_no_vpc_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'ClusterIdentifier': 'c1'}
+        client = _redshift_client([cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'ClusterIdentifier': 'c1', 'VpcId': 'vpc-1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _redshift_client([cluster])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_cluster_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
         cluster = {'ClusterIdentifier': 'c1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}

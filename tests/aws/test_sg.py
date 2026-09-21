@@ -60,6 +60,24 @@ class TestGather:
         assert kwargs['resource_name'] == 'web'
         assert kwargs['scope_id'] == 'vpc-1'
         assert kwargs['raw']['_Rules'] == [rule]
+        w.add_edge.assert_called_once_with(from_type='security_group', from_id='sg-1', to_type='vpc', to_id='vpc-1', relationship='in_vpc')
+
+    def test_a_fully_suppressed_group_produces_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False  # simulates a real InventoryWriter's lensix-suppress=true handling
+        sg = {'GroupId': 'sg-1', 'GroupName': 'web', 'VpcId': 'vpc-1', 'Tags': [{'Key': 'lensix-suppress', 'Value': 'true'}]}
+        client = _ec2_client_split([sg], [])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_group_with_no_vpc_id_produces_no_edge(self):
+        w = MagicMock()
+        sg = {'GroupId': 'sg-1', 'GroupName': 'web'}  # no VpcId at all (EC2-Classic, long deprecated but still possible)
+        client = _ec2_client_split([sg], [])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
 
     def test_group_tags_are_passed_through_for_suppression(self):
         w = MagicMock()

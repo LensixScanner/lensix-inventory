@@ -30,6 +30,30 @@ class TestGather:
             resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster, tags=None,
         )
 
+    def test_a_cluster_produces_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'Engine': 'neptune', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1'}]}
+        with patch.object(m.boto3, 'client', return_value=_neptune([cluster])):
+            m.gather('us-east-1', w)
+        assert {'from_type': 'neptune_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_a_cluster_with_no_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'Engine': 'neptune', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1'}
+        with patch.object(m.boto3, 'client', return_value=_neptune([cluster])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'Engine': 'neptune', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1'}]}
+        with patch.object(m.boto3, 'client', return_value=_neptune([cluster])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_cluster_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
         cluster = {'Engine': 'neptune', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',

@@ -41,12 +41,24 @@ def gather(region, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'elasticsearch_domain:{name}', message=e)
             continue
-        writer.add_resource(
+        vpc_options = domain.get('VPCOptions') or {}
+        vpc_id = vpc_options.get('VPCId')
+        recorded = writer.add_resource(
             resource_type='elasticsearch_domain',
             region=region,
             resource_id=domain['ARN'],
             resource_name=name,
-            scope_id=domain.get('VPCOptions', {}).get('VPCId') if domain.get('VPCOptions') else None,
+            scope_id=vpc_id,
             raw=domain,
             tags=get_domain_tags(region, domain['ARN']),
         )
+        if not recorded:
+            continue
+        # VPCOptions is entirely absent for a public (non-VPC) domain --
+        # most of them -- so every lookup here defaults to [].
+        if vpc_id:
+            writer.add_edge(from_type='elasticsearch_domain', from_id=domain['ARN'], to_type='vpc', to_id=vpc_id, relationship='in_vpc')
+        for sg_id in vpc_options.get('SecurityGroupIds', []):
+            writer.add_edge(from_type='elasticsearch_domain', from_id=domain['ARN'], to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        for subnet_id in vpc_options.get('SubnetIds', []):
+            writer.add_edge(from_type='elasticsearch_domain', from_id=domain['ARN'], to_type='subnet', to_id=subnet_id, relationship='in_subnet')

@@ -108,7 +108,7 @@ def gather(region, writer):
             raw['_ProtectedByAwsBackup'] = (
                 False if protected_arns is None else cluster.get('ARN') in protected_arns
             )
-            writer.add_resource(
+            recorded = writer.add_resource(
                 resource_type='elasticache_cluster',
                 region=region,
                 resource_id=cluster_arn,
@@ -116,5 +116,14 @@ def gather(region, writer):
                 raw=raw,
                 tags=get_tags(region, cluster_arn),
             )
+            if not recorded:
+                continue
+            # SecurityGroups is the modern VPC-based field (CacheSecurityGroups
+            # is the legacy EC2-Classic one, skipped). No VpcId is exposed on
+            # either shape (only a subnet GROUP name, useless without an extra
+            # describe_cache_subnet_groups call).
+            for sg in cluster.get('SecurityGroups', []):
+                if sg.get('SecurityGroupId'):
+                    writer.add_edge(from_type='elasticache_cluster', from_id=cluster_arn, to_type='security_group', to_id=sg['SecurityGroupId'], relationship='member_of_sg')
     except Exception as e:
         writer.add_error(region=region, source='elasticache (cache clusters)', message=e)

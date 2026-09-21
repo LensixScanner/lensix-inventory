@@ -93,6 +93,40 @@ class TestGather:
         assert instance_call.kwargs['scope_id'] == 'vpc-1'
         assert instance_call.kwargs['raw']['_SSLParameter']['ParameterName'] == 'rds.force_ssl'
 
+    def test_instance_produces_vpc_and_security_group_edges(self):
+        w = MagicMock()
+        instance = {
+            'DBInstanceIdentifier': 'db1', 'DBSubnetGroup': {'VpcId': 'vpc-1'},
+            'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1', 'Status': 'active'}, {'VpcSecurityGroupId': 'sg-2'}],
+        }
+        client = _client(instances=[instance])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'rds_instance', 'from_id': 'db1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'rds_instance', 'from_id': 'db1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'rds_instance', 'from_id': 'db1', 'to_type': 'security_group', 'to_id': 'sg-2', 'relationship': 'member_of_sg'} in edges
+
+    def test_an_instance_with_no_vpc_or_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        instance = {'DBInstanceIdentifier': 'db1'}
+        client = _client(instances=[instance])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_instance_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        instance = {
+            'DBInstanceIdentifier': 'db1', 'DBSubnetGroup': {'VpcId': 'vpc-1'},
+            'TagList': [{'Key': 'lensix-suppress', 'Value': 'true'}],
+        }
+        client = _client(instances=[instance])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_instance_tags_are_passed_through_for_suppression(self):
         # RDS uses TagList, not Tags, across every describe_db_* API.
         w = MagicMock()

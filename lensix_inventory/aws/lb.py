@@ -152,6 +152,23 @@ def get_web_acl(region, resource_arn):
         return None
 
 
+def _add_target_edges(writer, from_type, from_id, target_health_descriptions):
+    """Shared by target_group -> {ec2_instance,lambda_function} (modern
+    ELBv2) and classic_load_balancer -> ec2_instance (classic ELB, no
+    target-group indirection) -- a target's Target.Id/InstanceId is an
+    EC2 instance id, a Lambda function ARN, or an IP address (IP-type
+    target groups aren't a resource Lensix tracks, so those produce no
+    edge)."""
+    for t in target_health_descriptions:
+        target_id = (t.get('Target') or {}).get('Id') or t.get('InstanceId')
+        if not target_id:
+            continue
+        if target_id.startswith('i-'):
+            writer.add_edge(from_type=from_type, from_id=from_id, to_type='ec2_instance', to_id=target_id, relationship='routes_to_instance')
+        elif target_id.startswith('arn:aws:lambda:'):
+            writer.add_edge(from_type=from_type, from_id=from_id, to_type='lambda_function', to_id=target_id, relationship='routes_to_function')
+
+
 def gather(region, writer):
     # Classic ELBs and modern ALB/NLBs are independent describe calls —
     # isolate them so one's failure doesn't discard the other.
@@ -165,7 +182,7 @@ def gather(region, writer):
         raw = dict(lb)
         raw['_Attributes'] = get_classic_attributes(region, name)
         raw['_InstanceHealth'] = get_classic_instance_health(region, name) if lb.get('Instances') else []
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='classic_load_balancer',
             region=region,
             resource_id=name,
@@ -174,6 +191,15 @@ def gather(region, writer):
             raw=raw,
             tags=get_classic_lb_tags(region, name),
         )
+        if not recorded:
+            continue
+        if lb.get('VPCId'):
+            writer.add_edge(from_type='classic_load_balancer', from_id=name, to_type='vpc', to_id=lb['VPCId'], relationship='in_vpc')
+        for sg_id in lb.get('SecurityGroups', []):
+            writer.add_edge(from_type='classic_load_balancer', from_id=name, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        # No target-group indirection for classic ELB -- it registers
+        # instances directly.
+        _add_target_edges(writer, 'classic_load_balancer', name, raw['_InstanceHealth'])
 
     try:
         modern_lbs = get_modern_lbs(region)
@@ -200,7 +226,7 @@ def gather(region, writer):
         if lb.get('Type') == 'application':
             raw['_WebACL'] = get_web_acl(region, arn)
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='load_balancer',
             region=region,
             resource_id=arn,
@@ -209,6 +235,15 @@ def gather(region, writer):
             raw=raw,
             tags=get_elbv2_tags(region, arn),
         )
+        if not recorded:
+            continue
+        if lb.get('VpcId'):
+            writer.add_edge(from_type='load_balancer', from_id=arn, to_type='vpc', to_id=lb['VpcId'], relationship='in_vpc')
+        for sg_id in lb.get('SecurityGroups', []):
+            writer.add_edge(from_type='load_balancer', from_id=arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        for tg in tg_records:
+            if tg.get('TargetGroupArn'):
+                writer.add_edge(from_type='load_balancer', from_id=arn, to_type='target_group', to_id=tg['TargetGroupArn'], relationship='routes_to')
 
     try:
         all_tgs = get_all_target_groups(region)
@@ -220,7 +255,7 @@ def gather(region, writer):
         raw = dict(tg)
         raw['_Attributes'] = get_target_group_attributes(region, tg_arn)
         raw['_TargetHealthDescriptions'] = get_target_health(region, tg_arn)
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='target_group',
             region=region,
             resource_id=tg_arn,
@@ -228,3 +263,5 @@ def gather(region, writer):
             raw=raw,
             tags=get_elbv2_tags(region, tg_arn),
         )
+        if recorded:
+            _add_target_edges(writer, 'target_group', tg_arn, raw['_TargetHealthDescriptions'])

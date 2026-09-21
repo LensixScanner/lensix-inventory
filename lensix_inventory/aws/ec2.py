@@ -175,7 +175,7 @@ def gather(region, writer):
         else:
             raw['_Metrics'] = None
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='ec2_instance',
             region=region,
             resource_id=iid,
@@ -185,6 +185,16 @@ def gather(region, writer):
             secret_scan_hits=secret_hits,
             tags=inst.get('Tags'),
         )
+        if not recorded:
+            continue
+        if inst.get('SubnetId'):
+            writer.add_edge(from_type='ec2_instance', from_id=iid, to_type='subnet', to_id=inst['SubnetId'], relationship='in_subnet')
+        for sg in inst.get('SecurityGroups', []):
+            if sg.get('GroupId'):
+                writer.add_edge(from_type='ec2_instance', from_id=iid, to_type='security_group', to_id=sg['GroupId'], relationship='member_of_sg')
+        for bdm in inst.get('BlockDeviceMappings', []):
+            if 'Ebs' in bdm and bdm['Ebs'].get('VolumeId'):
+                writer.add_edge(from_type='ec2_instance', from_id=iid, to_type='ebs_volume', to_id=bdm['Ebs']['VolumeId'], relationship='attached_volume')
 
     try:
         enis = get_network_interfaces(region)

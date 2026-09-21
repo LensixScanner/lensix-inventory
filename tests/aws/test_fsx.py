@@ -55,6 +55,37 @@ class TestGather:
             m.gather('us-east-1', w)
         assert w.add_resource.call_args.kwargs['scope_id'] is None
 
+    def test_a_file_system_produces_vpc_and_subnet_edges(self):
+        w = MagicMock()
+        fs = {
+            'FileSystemId': 'fs-1', 'ResourceARN': 'arn:1', 'VpcId': 'vpc-123',
+            'SubnetIds': ['subnet-1', 'subnet-2'],
+        }
+        with patch.object(m.boto3, 'client', return_value=_fsx([fs])):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'fsx_file_system', 'from_id': 'arn:1', 'to_type': 'vpc', 'to_id': 'vpc-123', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'fsx_file_system', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'fsx_file_system', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+
+    def test_a_file_system_with_no_vpc_or_subnets_produces_no_edges(self):
+        w = MagicMock()
+        fs = {'FileSystemId': 'fs-1', 'ResourceARN': 'arn:1'}
+        with patch.object(m.boto3, 'client', return_value=_fsx([fs])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_file_system_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        fs = {
+            'FileSystemId': 'fs-1', 'ResourceARN': 'arn:1', 'VpcId': 'vpc-123',
+            'SubnetIds': ['subnet-1'],
+        }
+        with patch.object(m.boto3, 'client', return_value=_fsx([fs])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_no_file_systems_gathers_nothing(self):
         w = MagicMock()
         with patch.object(m.boto3, 'client', return_value=_fsx([])):

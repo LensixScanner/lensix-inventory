@@ -45,6 +45,40 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_called_once()
 
+    def test_an_instance_associated_eip_produces_an_instance_edge_not_an_eni_edge(self):
+        w = MagicMock()
+        eip = {'PublicIp': '1.2.3.4', 'AllocationId': 'eipalloc-1', 'InstanceId': 'i-1',
+               'NetworkInterfaceId': 'eni-1', 'SubnetId': 'subnet-1'}
+        with patch.object(m.boto3, 'client', return_value=_ec2([eip])):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'elastic_ip', 'from_id': 'eipalloc-1', 'to_type': 'ec2_instance', 'to_id': 'i-1', 'relationship': 'associated_with'} in edges
+        assert not any(e['to_type'] == 'elastic_network_interface' for e in edges)
+        assert {'from_type': 'elastic_ip', 'from_id': 'eipalloc-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+
+    def test_an_eni_associated_eip_with_no_instance_produces_an_eni_edge(self):
+        w = MagicMock()
+        eip = {'PublicIp': '1.2.3.4', 'AllocationId': 'eipalloc-1', 'NetworkInterfaceId': 'eni-1'}
+        with patch.object(m.boto3, 'client', return_value=_ec2([eip])):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'elastic_ip', 'from_id': 'eipalloc-1', 'to_type': 'elastic_network_interface', 'to_id': 'eni-1', 'relationship': 'associated_with'} in edges
+
+    def test_an_unassociated_eip_produces_no_edges(self):
+        w = MagicMock()
+        eip = {'PublicIp': '1.2.3.4', 'AllocationId': 'eipalloc-1'}
+        with patch.object(m.boto3, 'client', return_value=_ec2([eip])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_eip_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        eip = {'PublicIp': '1.2.3.4', 'AllocationId': 'eipalloc-1', 'InstanceId': 'i-1'}
+        with patch.object(m.boto3, 'client', return_value=_ec2([eip])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_falls_back_to_public_ip_when_allocation_id_missing(self):
         # EC2-Classic EIPs have no AllocationId.
         w = MagicMock()

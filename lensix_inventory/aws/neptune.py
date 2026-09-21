@@ -23,7 +23,7 @@ def gather(region, writer):
     for cluster in get_clusters(region):
         arn = cluster.get('DBClusterArn', '')
         name = cluster.get('DBClusterIdentifier', arn)
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='neptune_cluster',
             region=region,
             resource_id=arn,
@@ -33,3 +33,12 @@ def gather(region, writer):
             # shape, TagList included.
             tags=cluster.get('TagList'),
         )
+        if not recorded:
+            continue
+        # No free VPC edge -- see documentdb.py's own comment (the
+        # RDS-family DescribeDBClusters API's DBSubnetGroup is just a
+        # name at the cluster level, not the VpcId-bearing object shape
+        # DescribeDBInstances returns).
+        for sg in cluster.get('VpcSecurityGroups', []):
+            if sg.get('VpcSecurityGroupId'):
+                writer.add_edge(from_type='neptune_cluster', from_id=arn, to_type='security_group', to_id=sg['VpcSecurityGroupId'], relationship='member_of_sg')
