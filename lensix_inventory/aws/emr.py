@@ -56,7 +56,7 @@ def gather(region, writer):
         else:
             raw['_SecurityConfig'] = None
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='emr_cluster',
             region=region,
             resource_id=cluster_id,
@@ -64,3 +64,20 @@ def gather(region, writer):
             raw=raw,
             tags=cluster.get('Tags'),
         )
+        if not recorded:
+            continue
+        # No VpcId is directly exposed; the subnet edge reaches it
+        # transitively via vpc.py's own subnet -> vpc edge. EMR has up to
+        # 5 distinct security-group fields across master/core/
+        # service-access nodes, plus two "additional" list fields -- all
+        # real, all already gathered on the cluster's own
+        # Ec2InstanceAttributes.
+        attrs = cluster.get('Ec2InstanceAttributes') or {}
+        if attrs.get('Ec2SubnetId'):
+            writer.add_edge(from_type='emr_cluster', from_id=cluster_id, to_type='subnet', to_id=attrs['Ec2SubnetId'], relationship='in_subnet')
+        sg_ids = set(attrs.get('AdditionalMasterSecurityGroups', [])) | set(attrs.get('AdditionalSlaveSecurityGroups', []))
+        for key in ('EmrManagedMasterSecurityGroup', 'EmrManagedSlaveSecurityGroup', 'ServiceAccessSecurityGroup'):
+            if attrs.get(key):
+                sg_ids.add(attrs[key])
+        for sg_id in sg_ids:
+            writer.add_edge(from_type='emr_cluster', from_id=cluster_id, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

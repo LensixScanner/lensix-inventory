@@ -31,6 +31,35 @@ class TestGather:
             resource_id='arn:aws:rds:us-east-1:1:cluster:c1', resource_name='c1', raw=cluster, tags=None,
         )
 
+    def test_a_cluster_produces_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'Engine': 'docdb', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1'}, {'VpcSecurityGroupId': 'sg-2'}]}
+        rds = _rds([cluster])
+        with patch.object(m.boto3, 'client', return_value=rds):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'docdb_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'docdb_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-2', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_cluster_with_no_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'Engine': 'docdb', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1'}
+        rds = _rds([cluster])
+        with patch.object(m.boto3, 'client', return_value=rds):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'Engine': 'docdb', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',
+                   'VpcSecurityGroups': [{'VpcSecurityGroupId': 'sg-1'}]}
+        rds = _rds([cluster])
+        with patch.object(m.boto3, 'client', return_value=rds):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_cluster_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
         cluster = {'Engine': 'docdb', 'DBClusterArn': 'arn:1', 'DBClusterIdentifier': 'c1',

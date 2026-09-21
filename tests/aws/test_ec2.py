@@ -6,12 +6,19 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.aws.ec2 as m
 
 
-def _instance(iid='i-1', state='running', tags=None, vpc_id=None):
+def _instance(iid='i-1', state='running', tags=None, vpc_id=None, subnet_id=None,
+              security_group_ids=None, volume_ids=None):
     d = {'InstanceId': iid, 'State': {'Name': state}}
     if tags is not None:
         d['Tags'] = tags
     if vpc_id is not None:
         d['VpcId'] = vpc_id
+    if subnet_id is not None:
+        d['SubnetId'] = subnet_id
+    if security_group_ids is not None:
+        d['SecurityGroups'] = [{'GroupId': sg} for sg in security_group_ids]
+    if volume_ids is not None:
+        d['BlockDeviceMappings'] = [{'DeviceName': f'/dev/xvd{chr(ord("f") + i)}', 'Ebs': {'VolumeId': vol_id}} for i, vol_id in enumerate(volume_ids)]
     return d
 
 
@@ -164,6 +171,35 @@ class TestGather:
             m.gather('us-east-1', w)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['ec2_instance'].kwargs['secret_scan_hits'] == ['AWS Secret Access Key']
+
+    def test_an_instance_produces_subnet_security_group_and_volume_edges(self):
+        w = MagicMock()
+        inst = _instance(iid='i-1', subnet_id='subnet-1', security_group_ids=['sg-1', 'sg-2'], volume_ids=['vol-1'])
+        client = _client(instances=[inst])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'ec2_instance', 'from_id': 'i-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'ec2_instance', 'from_id': 'i-1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'ec2_instance', 'from_id': 'i-1', 'to_type': 'security_group', 'to_id': 'sg-2', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'ec2_instance', 'from_id': 'i-1', 'to_type': 'ebs_volume', 'to_id': 'vol-1', 'relationship': 'attached_volume'} in edges
+
+    def test_a_fully_suppressed_instance_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False  # simulates a real InventoryWriter's lensix-suppress=true handling
+        inst = _instance(iid='i-1', subnet_id='subnet-1', security_group_ids=['sg-1'], tags=[{'Key': 'lensix-suppress', 'Value': 'true'}])
+        client = _client(instances=[inst])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_an_instance_with_no_subnet_security_groups_or_volumes_produces_no_edges(self):
+        w = MagicMock()
+        inst = _instance(iid='i-1')
+        client = _client(instances=[inst])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
 
     def test_adds_one_resource_per_network_interface(self):
         w = MagicMock()

@@ -43,7 +43,7 @@ def gather(region, writer):
             writer.add_error(region=region, source=f'msk_cluster:{arn}', message=e)
             cluster = summary
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='msk_cluster',
             region=region,
             resource_id=arn,
@@ -53,3 +53,20 @@ def gather(region, writer):
             # a list of {'Key','Value'} pairs — no extra call needed.
             tags=cluster.get('Tags'),
         )
+        if not recorded:
+            continue
+        # No VpcId is ever exposed directly; subnet edges reach it
+        # transitively via vpc.py's own subnet -> vpc edge. Provisioned
+        # and Serverless clusters carry this data in different shapes (a
+        # serverless cluster can have more than one VPC config).
+        prov = cluster.get('Provisioned') or {}
+        broker_info = prov.get('BrokerNodeGroupInfo') or {}
+        for subnet_id in broker_info.get('ClientSubnets', []):
+            writer.add_edge(from_type='msk_cluster', from_id=arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+        for sg_id in broker_info.get('SecurityGroups', []):
+            writer.add_edge(from_type='msk_cluster', from_id=arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
+        for vpc_config in (cluster.get('Serverless') or {}).get('VpcConfigs', []):
+            for subnet_id in vpc_config.get('SubnetIds', []):
+                writer.add_edge(from_type='msk_cluster', from_id=arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            for sg_id in vpc_config.get('SecurityGroupIds', []):
+                writer.add_edge(from_type='msk_cluster', from_id=arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

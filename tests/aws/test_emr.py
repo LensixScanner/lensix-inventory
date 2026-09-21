@@ -79,6 +79,41 @@ class TestGather:
         assert w.add_error.call_args.kwargs['source'] == 'emr_cluster:bad'
         w.add_resource.assert_called_once()
 
+    def test_a_cluster_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'Id': 'j-1', 'Name': 'analytics', 'Ec2InstanceAttributes': {
+            'Ec2SubnetId': 'subnet-1',
+            'EmrManagedMasterSecurityGroup': 'sg-1',
+            'EmrManagedSlaveSecurityGroup': 'sg-2',
+            'ServiceAccessSecurityGroup': 'sg-3',
+            'AdditionalMasterSecurityGroups': ['sg-4'],
+            'AdditionalSlaveSecurityGroups': ['sg-5'],
+        }}
+        client = _emr_client([{'Id': 'j-1'}], detail_by_id={'j-1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'emr_cluster', 'from_id': 'j-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        for sg_id in ('sg-1', 'sg-2', 'sg-3', 'sg-4', 'sg-5'):
+            assert {'from_type': 'emr_cluster', 'from_id': 'j-1', 'to_type': 'security_group', 'to_id': sg_id, 'relationship': 'member_of_sg'} in edges
+
+    def test_a_cluster_with_no_ec2_instance_attributes_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'Id': 'j-1', 'Name': 'analytics'}
+        client = _emr_client([{'Id': 'j-1'}], detail_by_id={'j-1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'Id': 'j-1', 'Name': 'analytics', 'Ec2InstanceAttributes': {'Ec2SubnetId': 'subnet-1'}}
+        client = _emr_client([{'Id': 'j-1'}], detail_by_id={'j-1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_the_original_cluster_dict_is_not_mutated(self):
         w = MagicMock()
         cluster = {'Id': 'j-1', 'Name': 'analytics'}

@@ -60,7 +60,7 @@ def gather(region, writer):
 
     for ws in workspaces:
         ws_id = ws['WorkspaceId']
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='workspace',
             region=region,
             resource_id=ws_id,
@@ -68,6 +68,11 @@ def gather(region, writer):
             raw=ws,
             tags=get_tags(region, ws_id),
         )
+        # A WorkSpace only ever exposes SubnetId, no VpcId/SecurityGroups
+        # directly; the subnet edge reaches its VPC transitively via
+        # vpc.py's own subnet -> vpc edge.
+        if recorded and ws.get('SubnetId'):
+            writer.add_edge(from_type='workspace', from_id=ws_id, to_type='subnet', to_id=ws['SubnetId'], relationship='in_subnet')
 
     try:
         ip_groups = get_ip_groups(region)

@@ -60,6 +60,37 @@ class TestGather:
             m.gather('us-east-1', w)
         assert w.add_resource.call_args.kwargs['tags'] == tags
 
+    def test_a_vpc_hosted_server_produces_vpc_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        detail = {'ServerId': 's-1', 'EndpointDetails': {
+            'VpcId': 'vpc-1', 'SubnetIds': ['subnet-1', 'subnet-2'], 'SecurityGroupIds': ['sg-1'],
+        }}
+        client = _tf_client([{'Servers': [{'ServerId': 's-1'}]}], detail_by_id={'s-1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'transfer_server', 'from_id': 's-1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'transfer_server', 'from_id': 's-1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'transfer_server', 'from_id': 's-1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'transfer_server', 'from_id': 's-1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_public_server_with_no_endpoint_details_produces_no_edges(self):
+        w = MagicMock()
+        detail = {'ServerId': 's-1'}
+        client = _tf_client([{'Servers': [{'ServerId': 's-1'}]}], detail_by_id={'s-1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_server_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        detail = {'ServerId': 's-1', 'EndpointDetails': {'VpcId': 'vpc-1'}}
+        client = _tf_client([{'Servers': [{'ServerId': 's-1'}]}], detail_by_id={'s-1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_describe_failure_for_one_server_does_not_abort_the_others(self):
         w = MagicMock()
         client = _tf_client(

@@ -118,14 +118,27 @@ def gather(region, writer):
     try:
         for project in get_codebuild_projects(region):
             raw, secret_hits = _redact_project(project)
-            writer.add_resource(
+            project_id = project.get('arn', project.get('name', ''))
+            recorded = writer.add_resource(
                 resource_type='codebuild_project',
                 region=region,
-                resource_id=project.get('arn', project.get('name', '')),
+                resource_id=project_id,
                 resource_name=project.get('name', ''),
                 raw=raw,
                 secret_scan_hits=secret_hits,
                 tags=project.get('tags'),
             )
+            if not recorded:
+                continue
+            # CodeBuild's own API uses camelCase (like EKS/CodeBuild's
+            # sibling AWS Builder Tools APIs); vpcConfig is entirely
+            # absent for the far more common non-VPC project.
+            vpc_config = project.get('vpcConfig') or {}
+            if vpc_config.get('vpcId'):
+                writer.add_edge(from_type='codebuild_project', from_id=project_id, to_type='vpc', to_id=vpc_config['vpcId'], relationship='in_vpc')
+            for subnet_id in vpc_config.get('subnets', []):
+                writer.add_edge(from_type='codebuild_project', from_id=project_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            for sg_id in vpc_config.get('securityGroupIds', []):
+                writer.add_edge(from_type='codebuild_project', from_id=project_id, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
     except Exception as e:
         writer.add_error(region=region, source='cicd (codebuild projects)', message=e)

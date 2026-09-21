@@ -19,6 +19,8 @@ uploaded `s3_bucket` resources, the same way sg.py skips re-deriving
 "is this SG referenced anywhere" from other resources' own data.
 """
 
+import re
+
 import boto3
 
 
@@ -49,6 +51,26 @@ def get_distribution_tags(arn):
         return []
 
 
+def _extract_bucket_name(domain_name):
+    """Extract S3 bucket name from a CloudFront S3 origin DomainName.
+
+    Handles forms like:
+      mybucket.s3.amazonaws.com
+      mybucket.s3.us-east-1.amazonaws.com
+      mybucket.s3-website-us-east-1.amazonaws.com
+      mybucket.s3-website.us-east-1.amazonaws.com
+    """
+    m = re.match(r'^([^.]+)\.s3[.-]', domain_name)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _is_s3_origin(origin):
+    """Return True if this origin targets an S3 bucket (not a custom origin)."""
+    return 'S3OriginConfig' in origin and 'CustomOriginConfig' not in origin
+
+
 def gather(writer):
     for dist in get_distributions():
         dist_id = dist['Id']
@@ -59,7 +81,7 @@ def gather(writer):
             raw['_DistributionConfig'] = get_distribution_config(dist_id)
         except Exception as e:
             writer.add_error(region='global', source=f'cloudfront_distribution:{dist_id}', message=e)
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='cloudfront_distribution',
             region='global',
             resource_id=dist_id,
@@ -67,3 +89,17 @@ def gather(writer):
             raw=raw,
             tags=get_distribution_tags(arn),
         )
+        if not recorded:
+            continue
+        # Only the S3-origin case is handled: the bucket name is
+        # recoverable from the origin's DomainName string, and s3.py's own
+        # resource_id for s3_bucket is exactly that bucket name. A
+        # custom/ALB origin's DomainName is just a DNS hostname with no
+        # derivable resource_id -- deliberately out of scope here.
+        config = raw.get('_DistributionConfig') or {}
+        for origin in config.get('Origins', {}).get('Items', []):
+            if not _is_s3_origin(origin):
+                continue
+            bucket = _extract_bucket_name(origin.get('DomainName', ''))
+            if bucket:
+                writer.add_edge(from_type='cloudfront_distribution', from_id=dist_id, to_type='s3_bucket', to_id=bucket, relationship='routes_to')

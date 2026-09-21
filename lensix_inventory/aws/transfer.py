@@ -45,7 +45,7 @@ def gather(region, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'transfer_server:{server_id}', message=e)
             continue
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='transfer_server',
             region=region,
             resource_id=server_id,
@@ -53,3 +53,14 @@ def gather(region, writer):
             raw=server,
             tags=server.get('Tags'),
         )
+        if not recorded:
+            continue
+        # EndpointDetails (VpcId/SubnetIds/SecurityGroupIds) is only
+        # present for VPC-hosted endpoint type servers, not PUBLIC ones.
+        endpoint = server.get('EndpointDetails') or {}
+        if endpoint.get('VpcId'):
+            writer.add_edge(from_type='transfer_server', from_id=server_id, to_type='vpc', to_id=endpoint['VpcId'], relationship='in_vpc')
+        for subnet_id in endpoint.get('SubnetIds', []):
+            writer.add_edge(from_type='transfer_server', from_id=server_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+        for sg_id in endpoint.get('SecurityGroupIds', []):
+            writer.add_edge(from_type='transfer_server', from_id=server_id, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

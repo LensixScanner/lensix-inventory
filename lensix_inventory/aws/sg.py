@@ -403,7 +403,7 @@ def gather(region, writer):
         group_id = sg['GroupId']
         raw = dict(sg)
         raw['_Rules'] = rules_by_group.get(group_id, [])
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='security_group',
             region=region,
             resource_id=group_id,
@@ -412,6 +412,8 @@ def gather(region, writer):
             raw=raw,
             tags=sg.get('Tags'),
         )
+        if recorded and sg.get('VpcId'):
+            writer.add_edge(from_type='security_group', from_id=group_id, to_type='vpc', to_id=sg['VpcId'], relationship='in_vpc')
 
     # Synthetic, region-scoped singleton (same convention as account.py's
     # iam_password_policy/catalog_encryption) — added unconditionally, even

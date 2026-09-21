@@ -155,6 +155,31 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['elasticache_cluster'].kwargs['raw']['_ProtectedByAwsBackup'] is False
 
+    def test_a_cache_cluster_produces_security_group_edges(self):
+        w = MagicMock()
+        cluster = {'CacheClusterId': 'c1', 'ARN': 'arn:1', 'SecurityGroups': [{'SecurityGroupId': 'sg-1'}]}
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        assert {'from_type': 'elasticache_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_a_cache_cluster_with_no_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'CacheClusterId': 'c1', 'ARN': 'arn:1'}
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cache_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'CacheClusterId': 'c1', 'ARN': 'arn:1', 'SecurityGroups': [{'SecurityGroupId': 'sg-1'}]}
+        client = _ec_client(cluster_pages=[{'CacheClusters': [cluster]}])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_backup_lookup_failure_stamps_false_on_both_resource_types_and_records_an_error(self):
         w = MagicMock()
         rg = {'ReplicationGroupId': 'rg1', 'ARN': 'arn:aws:elasticache:us-east-1:1:replicationgroup:rg1'}

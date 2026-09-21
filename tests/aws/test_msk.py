@@ -48,6 +48,60 @@ class TestGather:
             resource_id='arn:c1', resource_name='my-cluster', raw=detail, tags=None,
         )
 
+    def test_a_provisioned_cluster_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        detail = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster', 'Provisioned': {
+            'BrokerNodeGroupInfo': {'ClientSubnets': ['subnet-1', 'subnet-2'], 'SecurityGroups': ['sg-1']},
+        }}
+        client = _msk_client([{'ClusterInfoList': [summary]}], detail_by_arn={'arn:c1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_serverless_cluster_with_multiple_vpc_configs_produces_edges_for_each(self):
+        w = MagicMock()
+        summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        detail = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster', 'Serverless': {
+            'VpcConfigs': [
+                {'SubnetIds': ['subnet-1'], 'SecurityGroupIds': ['sg-1']},
+                {'SubnetIds': ['subnet-2'], 'SecurityGroupIds': ['sg-2']},
+            ],
+        }}
+        client = _msk_client([{'ClusterInfoList': [summary]}], detail_by_arn={'arn:c1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'msk_cluster', 'from_id': 'arn:c1', 'to_type': 'security_group', 'to_id': 'sg-2', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_cluster_with_neither_shape_produces_no_edges(self):
+        w = MagicMock()
+        summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        detail = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        client = _msk_client([{'ClusterInfoList': [summary]}], detail_by_arn={'arn:c1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}
+        detail = {
+            'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster',
+            'Provisioned': {'BrokerNodeGroupInfo': {'SecurityGroups': ['sg-1']}},
+        }
+        client = _msk_client([{'ClusterInfoList': [summary]}], detail_by_arn={'arn:c1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_cluster_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
         summary = {'ClusterArn': 'arn:c1', 'ClusterName': 'my-cluster'}

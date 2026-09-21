@@ -113,7 +113,7 @@ def gather(region, writer):
     try:
         for cluster in get_dax_clusters(region):
             cluster_arn = cluster.get('ClusterArn', cluster.get('ClusterName', ''))
-            writer.add_resource(
+            recorded = writer.add_resource(
                 resource_type='dax_cluster',
                 region=region,
                 resource_id=cluster_arn,
@@ -121,5 +121,15 @@ def gather(region, writer):
                 raw=cluster,
                 tags=get_dax_cluster_tags(region, cluster_arn),
             )
+            if not recorded:
+                continue
+            # DescribeClusters' own SubnetGroup field is just a name string
+            # at this level, not the VpcId-bearing object shape (same
+            # DocumentDB/Neptune limitation) -- only the security-group
+            # edge is derivable without a new call.
+            for sg in cluster.get('SecurityGroups', []):
+                sg_id = sg.get('SecurityGroupIdentifier')
+                if sg_id:
+                    writer.add_edge(from_type='dax_cluster', from_id=cluster_arn, to_type='security_group', to_id=sg_id, relationship='member_of_sg')
     except Exception as e:
         writer.add_error(region=region, source='dynamodb (dax clusters)', message=e)

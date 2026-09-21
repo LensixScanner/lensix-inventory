@@ -1,11 +1,14 @@
 """Inventory file writer — gzip-compressed NDJSON, one manifest line
-followed by one resource record per line.
+followed by one resource/edge/error record per line.
 
 Format (see README.md for the full spec):
     line 1:   {"kind": "manifest", ...}
     line 2+:  {"kind": "resource", "resource_type": ..., "region": ...,
                "resource_id": ..., "resource_name": ..., "scope_id": ...,
                "raw": {...}, "secret_scan_hits": [...]}
+              {"kind": "edge", "from_type": ..., "from_id": ...,
+               "to_type": ..., "to_id": ..., "relationship": ...}
+              {"kind": "error", "region": ..., "source": ..., "message": ...}
 
 NDJSON (not a single JSON array) so the import side can stream-process line
 by line instead of materializing the whole file in memory, and so one
@@ -19,6 +22,22 @@ these straight through with no field mapping. `raw` carries the full
 redacts a raw secret-bearing field client-side (see common/secrets.py) —
 its presence signals "the raw field was intentionally omitted here, this
 is the local scan result instead."
+
+Edges (add_edge(), below) record a directed relationship between two
+resources this same gather() run already recorded via add_resource()
+(e.g. ec2_instance -> subnet, relationship "in_subnet") — they power
+Lensix's diagram/network-map feature and AI insights (root-cause
+clustering, blast radius) identically whether this file was produced by a
+live scan or a self-hosted/uploaded run. Deriving relationships here,
+at gather time, rather than downstream in lensix-scanner-light, is
+deliberate: it's the one place that already has the real API response
+shape in hand, and it means a self-hosted customer's own upload carries
+exactly the same edges a live scan would produce — no separate,
+potentially-drifting implementation of "what relates to what" living in a
+different repo. See resource_edges' own contract downstream: both
+endpoints of an edge must ALSO have been recorded via add_resource() in
+this same run (or already persisted from an earlier one), or the edge is
+silently unusable.
 """
 
 import gzip
@@ -161,6 +180,7 @@ class InventoryWriter:
         self._regions = set()
         self._errors = []
         self._tag_suppressions = []
+        self._edges = []
 
     def add_resource(self, resource_type, region, resource_id, resource_name,
                       raw, scope_id=None, secret_scan_hits=None, tags=None):
@@ -183,7 +203,14 @@ class InventoryWriter:
         tag_suppressions (below) for lensix-scanner-light's own
         suppressions-table sync — a separate, visibility-only step; this
         method's own enforcement above doesn't depend on that sync
-        happening or succeeding."""
+        happening or succeeding.
+
+        Returns True if the resource was actually recorded, False if it
+        was fully suppressed. A gather() function that also calls
+        add_edge() for this same resource should check this return value
+        first — an edge from/to a fully-suppressed resource would
+        otherwise leak a reference to a resource that was never supposed
+        to reach Lensix at all."""
         full_suppress, suppressed_check_ids = parse_tag_suppression(tags)
         if full_suppress or suppressed_check_ids:
             self._tag_suppressions.append({
@@ -194,7 +221,7 @@ class InventoryWriter:
                 "check_ids": sorted(suppressed_check_ids),
             })
         if full_suppress:
-            return
+            return False
 
         if suppressed_check_ids:
             raw = dict(raw) if isinstance(raw, dict) else raw
@@ -228,6 +255,39 @@ class InventoryWriter:
         self._counts[resource_type] += 1
         if region:
             self._regions.add(region)
+        return True
+
+    def add_edge(self, from_type, from_id, to_type, to_id, relationship):
+        """Records one directed relationship between two resources this
+        gather() run already recorded (or will record) via add_resource()
+        — see this module's own docstring for why edges are derived here
+        rather than downstream. Deliberately doesn't itself validate that
+        either endpoint was actually add_resource()'d (a gather() function
+        may legitimately call add_edge() before or after the matching
+        add_resource() calls, and the "to" endpoint is very often a
+        resource type a DIFFERENT gather() function owns entirely, e.g.
+        an ec2_instance's own subnet) — persist_resource_edges()
+        downstream already tolerates an edge whose endpoint was never
+        persisted as a resource (silently unusable, not an error), so
+        mirroring that same tolerance here avoids this method needing to
+        know about every other gather() function's own call order.
+
+        The one endpoint a caller CAN and should check first is its own
+        "from" resource: add_resource() returns False when a resource was
+        fully suppressed (lensix-suppress=true) and never recorded at all
+        — a gather() function that calls add_edge() for that same
+        resource regardless would leak a reference to something that was
+        never supposed to reach Lensix. Every gather() function in this
+        tool that both add_resource()s and add_edge()s the same resource
+        guards the edge calls on that resource's own add_resource()
+        return value."""
+        self._edges.append({
+            "from_type": from_type,
+            "from_id": from_id,
+            "to_type": to_type,
+            "to_id": to_id,
+            "relationship": relationship,
+        })
 
     def add_error(self, region, source, message):
         # Gathering errors (e.g. AccessDenied on one API call) shouldn't
@@ -255,6 +315,15 @@ class InventoryWriter:
         return list(self._tag_suppressions)
 
     @property
+    def edges(self):
+        """The relationships gathered so far, as plain dicts — same shape
+        each 'kind: edge' line of the written file has (minus the "kind"
+        key), and the same shape lensix-scanner-light's own
+        persist_resource_edges() expects. Available before (and without
+        requiring) a call to write(), same as .records."""
+        return list(self._edges)
+
+    @property
     def records(self):
         """The resource records gathered so far, as plain dicts — same
         shape each line 2+ of the written file has (minus the "kind" key),
@@ -275,12 +344,15 @@ class InventoryWriter:
             "regions": sorted(self._regions),
             "resource_counts": dict(self._counts),
             "total_resources": len(self._records),
+            "total_edges": len(self._edges),
             "error_count": len(self._errors),
         }
         with gzip.open(path, "wt", encoding="utf-8") as f:
             f.write(json.dumps(manifest, default=_json_default) + "\n")
             for record in self._records:
                 f.write(json.dumps(record, default=_json_default) + "\n")
+            for edge in self._edges:
+                f.write(json.dumps({"kind": "edge", **edge}, default=_json_default) + "\n")
             for error in self._errors:
                 f.write(json.dumps({"kind": "error", **error}, default=_json_default) + "\n")
         # This file holds a full resource-configuration inventory (security

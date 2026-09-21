@@ -50,6 +50,36 @@ class TestGather:
             m.gather('us-east-1', w)
         assert w.add_resource.call_args.kwargs['tags'] == tags
 
+    def test_a_notebook_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        summary = {'NotebookInstanceName': 'nb1', 'NotebookInstanceArn': 'arn:1'}
+        detail = {'NotebookInstanceName': 'nb1', 'SubnetId': 'subnet-1', 'SecurityGroups': ['sg-1']}
+        client = _sm_client([summary], detail_by_name={'nb1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'sagemaker_notebook', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'sagemaker_notebook', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_notebook_with_no_subnet_or_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        summary = {'NotebookInstanceName': 'nb1', 'NotebookInstanceArn': 'arn:1'}
+        detail = {'NotebookInstanceName': 'nb1'}
+        client = _sm_client([summary], detail_by_name={'nb1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_notebook_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        summary = {'NotebookInstanceName': 'nb1', 'NotebookInstanceArn': 'arn:1'}
+        detail = {'NotebookInstanceName': 'nb1', 'SubnetId': 'subnet-1'}
+        client = _sm_client([summary], detail_by_name={'nb1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_describe_failure_for_one_notebook_does_not_abort_the_others(self):
         w = MagicMock()
         bad = {'NotebookInstanceName': 'bad', 'NotebookInstanceArn': 'arn:bad'}

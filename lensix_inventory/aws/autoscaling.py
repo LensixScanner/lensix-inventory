@@ -336,11 +336,25 @@ def gather(region, writer):
             asg['_LaunchTemplateMarketType'] = None
             writer.add_error(region, 'autoscaling launch template/configuration lookup',
                               f"{asg.get('AutoScalingGroupName', asg.get('AutoScalingGroupARN'))}: {e}")
-        writer.add_resource(
+        asg_arn = asg['AutoScalingGroupARN']
+        recorded = writer.add_resource(
             resource_type='autoscaling_group',
             region=region,
-            resource_id=asg['AutoScalingGroupARN'],
+            resource_id=asg_arn,
             resource_name=asg['AutoScalingGroupName'],
             raw=asg,
             tags=asg.get('Tags'),
         )
+        if not recorded:
+            continue
+        # VPCZoneIdentifier is a real, documented ASG API quirk: a
+        # comma-separated string of subnet ids, not a list -- no VpcId is
+        # exposed directly, but subnet edges reach it transitively via
+        # vpc.py's own subnet -> vpc edge. Instances is the ASG's own
+        # currently-running member list, already on this same record.
+        zone_identifier = asg.get('VPCZoneIdentifier', '')
+        for subnet_id in filter(None, zone_identifier.split(',')):
+            writer.add_edge(from_type='autoscaling_group', from_id=asg_arn, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+        for instance in asg.get('Instances', []):
+            if instance.get('InstanceId'):
+                writer.add_edge(from_type='autoscaling_group', from_id=asg_arn, to_type='ec2_instance', to_id=instance['InstanceId'], relationship='manages_instance')

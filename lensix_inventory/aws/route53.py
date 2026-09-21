@@ -11,6 +11,16 @@ Zones: list_hosted_zones (public zones only) + the apex TXT record set
 (needed for SPF evaluation) folded into each zone's raw record as
 `_ApexTxtRecordSets` — the raw record data, not a computed has-SPF boolean
 — matching s3.py's fused fan-out pattern, into a `route53_zone` record.
+
+Private zones: gathered separately as their own resource type,
+`route53_private_zone` — INVENTORY ONLY, no findings evaluate this type
+today (deliberate scope: existing route53 checks, e.g. the apex-TXT/SPF
+one above, were written assuming public zones; private zones get exactly
+one thing here, their VPC associations, fused in as `_VPCs` via
+get_hosted_zone — GetHostedZone's own field, never fetched at all for
+public zones either since nothing needs it there). Consumers that only
+care about resource_edges/diagrams (not findings) can use this resource
+type immediately.
 """
 
 import boto3
@@ -68,6 +78,36 @@ def get_public_zones():
             break
         kwargs['Marker'] = marker
     return zones
+
+
+def get_private_zones():
+    """Return list of (zone_id, zone_name) for all private hosted zones --
+    the mirror image of get_public_zones()'s own filter. A real, accepted
+    duplicate list_hosted_zones() call between the two (same trade-off as
+    this tool's other independently-gathered, cross-referenced resource
+    types), not a shared single fetch, so each stays independently
+    testable and one's own failure doesn't affect the other."""
+    client = boto3.client('route53', config=_BOTO_CFG)
+    zones = []
+    kwargs = {}
+    while True:
+        resp = client.list_hosted_zones(**kwargs)
+        for z in resp['HostedZones']:
+            if z['Config']['PrivateZone']:
+                zones.append((z['Id'], z['Name']))
+        marker = resp.get('NextMarker')
+        if not resp.get('IsTruncated') or not marker:
+            break
+        kwargs['Marker'] = marker
+    return zones
+
+
+def get_hosted_zone_vpcs(zone_id):
+    """GetHostedZone's own 'VPCs' field -- never fetched for public zones
+    (nothing needs it there); a private zone's only reason to exist here
+    at all."""
+    client = boto3.client('route53', config=_BOTO_CFG)
+    return client.get_hosted_zone(Id=zone_id).get('VPCs', [])
 
 
 def get_zone_tags(clean_zone_id):
@@ -145,3 +185,29 @@ def gather(writer):
             )
     except Exception as e:
         writer.add_error(region='global', source='route53 (hosted zones)', message=e)
+
+    try:
+        for zone_id, zone_name in get_private_zones():
+            clean_id = zone_id.split('/')[-1]
+            zone_name_clean = zone_name.rstrip('.')
+            raw = {'Id': zone_id, 'Name': zone_name}
+            try:
+                raw['_VPCs'] = get_hosted_zone_vpcs(zone_id)
+            except Exception as e:
+                writer.add_error(region='global', source=f'route53_private_zone:{clean_id}', message=e)
+                raw['_VPCs'] = []
+            recorded = writer.add_resource(
+                resource_type='route53_private_zone',
+                region='global',
+                resource_id=clean_id,
+                resource_name=zone_name_clean,
+                raw=raw,
+                tags=get_zone_tags(clean_id),
+            )
+            if recorded:
+                for vpc in raw['_VPCs']:
+                    vpc_id = vpc.get('VPCId')
+                    if vpc_id:
+                        writer.add_edge(from_type='route53_private_zone', from_id=clean_id, to_type='vpc', to_id=vpc_id, relationship='associated_with_vpc')
+    except Exception as e:
+        writer.add_error(region='global', source='route53 (private hosted zones)', message=e)

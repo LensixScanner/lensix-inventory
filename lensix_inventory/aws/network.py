@@ -22,7 +22,7 @@ def gather(region, writer):
     for eip in get_eips(region):
         ip = eip.get('PublicIp', '')
         alloc = eip.get('AllocationId', ip)
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='elastic_ip',
             region=region,
             resource_id=alloc,
@@ -30,3 +30,16 @@ def gather(region, writer):
             raw=eip,
             tags=eip.get('Tags'),
         )
+        if not recorded:
+            continue
+        # An instance-associated EIP's NetworkInterfaceId is just that
+        # instance's own primary ENI -- prefer the direct ec2_instance edge
+        # over a redundant ENI hop in that case, only falling back to the
+        # ENI edge for addresses attached directly to an interface with no
+        # owning instance (e.g. a NAT gateway's EIP).
+        if eip.get('InstanceId'):
+            writer.add_edge(from_type='elastic_ip', from_id=alloc, to_type='ec2_instance', to_id=eip['InstanceId'], relationship='associated_with')
+        elif eip.get('NetworkInterfaceId'):
+            writer.add_edge(from_type='elastic_ip', from_id=alloc, to_type='elastic_network_interface', to_id=eip['NetworkInterfaceId'], relationship='associated_with')
+        if eip.get('SubnetId'):
+            writer.add_edge(from_type='elastic_ip', from_id=alloc, to_type='subnet', to_id=eip['SubnetId'], relationship='in_subnet')

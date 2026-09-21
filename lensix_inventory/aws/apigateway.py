@@ -1,5 +1,9 @@
 """API Gateway gathering — REST APIs (v1), their stages, HTTP/WebSocket APIs
-(v2), their stages, and custom domain names (v1 + v2).
+(v2), their stages, custom domain names (v1 + v2), and VPC Links (v2's own
+private-connectivity resource, gathered independently -- not tied to any
+one API, the same way subnet/vpc are their own resources elsewhere in this
+tool). GetVpcLinks' own SecurityGroupIds/SubnetIds are already on that one
+list response, no follow-up call needed.
 
 Only the pure fetchers are included (get_rest_apis, get_rest_stages,
 get_http_apis, get_http_stages, get_v1_domain_names, get_v2_domain_names);
@@ -77,6 +81,22 @@ def get_v2_domain_names(region):
     return domains
 
 
+def get_vpc_links(region):
+    """apigatewayv2 registers no paginator for GetVpcLinks -- manually
+    NextToken-looped, same as glue.py's get_connections()."""
+    client = boto3.client('apigatewayv2', region_name=region)
+    links = []
+    next_token = None
+    while True:
+        kwargs = {'NextToken': next_token} if next_token else {}
+        resp = client.get_vpc_links(**kwargs)
+        links.extend(resp.get('Items', []))
+        next_token = resp.get('NextToken')
+        if not next_token:
+            break
+    return links
+
+
 def get_stage_web_acl(region, api_id, stage_name):
     """Raw data (which Web ACL, if any, protects this stage), not a
     computed pass/fail decision."""
@@ -100,10 +120,20 @@ def gather(region, writer):
         writer.add_error(region=region, source='apigateway (rest apis)', message=e)
         rest_apis = []
     for api in rest_apis:
-        writer.add_resource(
-            resource_type='apigw_rest_api', region=region, resource_id=api['id'],
-            resource_name=api.get('name', api['id']), raw=api, tags=api.get('tags'),
+        api_id = api['id']
+        recorded = writer.add_resource(
+            resource_type='apigw_rest_api', region=region, resource_id=api_id,
+            resource_name=api.get('name', api_id), raw=api, tags=api.get('tags'),
         )
+        if not recorded:
+            continue
+        # Only PRIVATE REST APIs carry any VPC-adjacent data at all:
+        # endpointConfiguration.vpcEndpointIds is already fetched for
+        # every API (no new call), non-empty only for PRIVATE endpoint
+        # type.
+        endpoint_config = api.get('endpointConfiguration') or {}
+        for vpce_id in endpoint_config.get('vpcEndpointIds', []):
+            writer.add_edge(from_type='apigw_rest_api', from_id=api_id, to_type='vpc_endpoint', to_id=vpce_id, relationship='via_vpc_endpoint')
 
     for api in rest_apis:
         api_id = api['id']
@@ -185,3 +215,27 @@ def gather(region, writer):
             resource_type='apigw_domain', region=region, resource_id=name,
             resource_name=name, raw=raw, tags=domain.get('Tags'),
         )
+
+    try:
+        vpc_links = get_vpc_links(region)
+    except Exception as e:
+        writer.add_error(region=region, source='apigateway (vpc links)', message=e)
+        vpc_links = []
+    for link in vpc_links:
+        link_id = link['VpcLinkId']
+        recorded = writer.add_resource(
+            resource_type='apigw_vpc_link', region=region, resource_id=link_id,
+            resource_name=link.get('Name', link_id), raw=link, tags=link.get('Tags'),
+        )
+        if not recorded:
+            continue
+        # Not linked from the HTTP API itself (that would need a further
+        # per-API get_integrations() call to find which integration
+        # references which VpcLinkId) -- these subnet/security-group edges
+        # are still enough for it to surface correctly in hub-based
+        # root-cause clustering alongside anything else sharing that
+        # subnet or security group.
+        for subnet_id in link.get('SubnetIds', []):
+            writer.add_edge(from_type='apigw_vpc_link', from_id=link_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+        for sg_id in link.get('SecurityGroupIds', []):
+            writer.add_edge(from_type='apigw_vpc_link', from_id=link_id, to_type='security_group', to_id=sg_id, relationship='member_of_sg')

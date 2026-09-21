@@ -49,6 +49,39 @@ class TestGather:
         _, kwargs = w.add_resource.call_args
         assert kwargs['resource_id'] == 'c1'
 
+    def test_a_cluster_produces_vpc_security_group_and_subnet_edges(self):
+        w = MagicMock()
+        cluster = {'arn': 'arn:1', 'resourcesVpcConfig': {
+            'vpcId': 'vpc-1', 'securityGroupIds': ['sg-1'], 'clusterSecurityGroupId': 'sg-2',
+            'subnetIds': ['subnet-1', 'subnet-2'],
+        }}
+        client = _eks_client(['c1'], detail_by_name={'c1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'eks_cluster', 'from_id': 'arn:1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'eks_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'eks_cluster', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-2', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'eks_cluster', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'eks_cluster', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+
+    def test_a_cluster_with_no_vpc_config_produces_no_edges(self):
+        w = MagicMock()
+        cluster = {'arn': 'arn:1', 'resourcesVpcConfig': {}}
+        client = _eks_client(['c1'], detail_by_name={'c1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cluster_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cluster = {'arn': 'arn:1', 'resourcesVpcConfig': {'vpcId': 'vpc-1', 'securityGroupIds': ['sg-1']}}
+        client = _eks_client(['c1'], detail_by_name={'c1': cluster})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_describe_failure_for_one_cluster_does_not_abort_the_others(self):
         w = MagicMock()
         good = {'arn': 'arn:c2', 'resourcesVpcConfig': {}}

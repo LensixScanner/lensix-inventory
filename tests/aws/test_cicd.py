@@ -111,6 +111,37 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['codebuild_project'].kwargs['tags'] == [{'key': 'lensix-suppress', 'value': 'true'}]
 
+    def test_a_codebuild_project_with_vpc_config_produces_vpc_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        project = {'name': 'p1', 'arn': 'arn:1', 'vpcConfig': {
+            'vpcId': 'vpc-1', 'subnets': ['subnet-1', 'subnet-2'], 'securityGroupIds': ['sg-1'],
+        }}
+        client = _client(cb_names=['p1'], cb_projects=[project])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'codebuild_project', 'from_id': 'arn:1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'codebuild_project', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'codebuild_project', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'codebuild_project', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_codebuild_project_with_no_vpc_config_produces_no_edges(self):
+        w = MagicMock()
+        project = {'name': 'p1', 'arn': 'arn:1'}
+        client = _client(cb_names=['p1'], cb_projects=[project])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_codebuild_project_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        project = {'name': 'p1', 'arn': 'arn:1', 'vpcConfig': {'vpcId': 'vpc-1'}}
+        client = _client(cb_names=['p1'], cb_projects=[project])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_codecommit_failure_does_not_prevent_codebuild_from_being_gathered(self):
         w = MagicMock()
         project = {'name': 'p1'}

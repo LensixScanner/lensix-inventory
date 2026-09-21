@@ -71,6 +71,35 @@ class TestGather:
         assert conn_call.kwargs['resource_id'] == 'my-db'
         assert conn_call.kwargs['raw']['ConnectionProperties'] == ['PASSWORD']
 
+    def test_a_connection_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        conn = {'Name': 'my-db', 'PhysicalConnectionRequirements': {
+            'SubnetId': 'subnet-1', 'SecurityGroupIdList': ['sg-1'],
+        }}
+        client = _client(connections=[conn])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'glue_connection', 'from_id': 'my-db', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'glue_connection', 'from_id': 'my-db', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_connection_with_no_physical_connection_requirements_produces_no_edges(self):
+        w = MagicMock()
+        conn = {'Name': 'my-db'}
+        client = _client(connections=[conn])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_connection_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        conn = {'Name': 'my-db', 'PhysicalConnectionRequirements': {'SubnetId': 'subnet-1'}}
+        client = _client(connections=[conn])
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_security_configurations_failure_does_not_prevent_connections_from_being_gathered(self):
         w = MagicMock()
         conn = {'Name': 'my-db'}

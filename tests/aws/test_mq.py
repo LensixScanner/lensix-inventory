@@ -61,6 +61,39 @@ class TestGather:
         _, kwargs = w.add_resource.call_args
         assert kwargs['resource_id'] == 'b1'
 
+    def test_a_broker_produces_subnet_and_security_group_edges(self):
+        w = MagicMock()
+        summary = {'BrokerId': 'b1', 'BrokerName': 'my-broker'}
+        detail = {'BrokerArn': 'arn:1', 'BrokerName': 'my-broker',
+                  'SubnetIds': ['subnet-1', 'subnet-2'], 'SecurityGroups': ['sg-1']}
+        client = _mq_client([{'BrokerSummaries': [summary]}], detail_by_id={'b1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'mq_broker', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'mq_broker', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'mq_broker', 'from_id': 'arn:1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+
+    def test_a_broker_with_no_subnets_or_security_groups_produces_no_edges(self):
+        w = MagicMock()
+        summary = {'BrokerId': 'b1', 'BrokerName': 'my-broker'}
+        detail = {'BrokerArn': 'arn:1', 'BrokerName': 'my-broker'}
+        client = _mq_client([{'BrokerSummaries': [summary]}], detail_by_id={'b1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_broker_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        summary = {'BrokerId': 'b1', 'BrokerName': 'my-broker'}
+        detail = {'BrokerArn': 'arn:1', 'BrokerName': 'my-broker',
+                  'SubnetIds': ['subnet-1'], 'SecurityGroups': ['sg-1']}
+        client = _mq_client([{'BrokerSummaries': [summary]}], detail_by_id={'b1': detail})
+        with patch.object(m.boto3, 'client', return_value=client):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_describe_failure_for_one_broker_does_not_abort_the_others(self):
         w = MagicMock()
         bad = {'BrokerId': 'bad', 'BrokerName': 'bad'}

@@ -64,6 +64,39 @@ class TestGather:
             m.gather('us-east-1', w)
         w.add_resource.assert_not_called()
 
+    def test_a_group_produces_subnet_and_instance_edges(self):
+        w = MagicMock()
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'VPCZoneIdentifier': 'subnet-1,subnet-2',
+            'Instances': [{'InstanceId': 'i-1'}, {'InstanceId': 'i-2'}],
+        }
+        with patch.object(m.boto3, 'client', return_value=_asg_client([asg])):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'autoscaling_group', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'autoscaling_group', 'from_id': 'arn:1', 'to_type': 'subnet', 'to_id': 'subnet-2', 'relationship': 'in_subnet'} in edges
+        assert {'from_type': 'autoscaling_group', 'from_id': 'arn:1', 'to_type': 'ec2_instance', 'to_id': 'i-1', 'relationship': 'manages_instance'} in edges
+        assert {'from_type': 'autoscaling_group', 'from_id': 'arn:1', 'to_type': 'ec2_instance', 'to_id': 'i-2', 'relationship': 'manages_instance'} in edges
+
+    def test_a_group_with_no_subnets_or_instances_produces_no_edges(self):
+        w = MagicMock()
+        asg = {'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg'}
+        with patch.object(m.boto3, 'client', return_value=_asg_client([asg])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_group_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        asg = {
+            'AutoScalingGroupARN': 'arn:1', 'AutoScalingGroupName': 'web-asg',
+            'VPCZoneIdentifier': 'subnet-1', 'Instances': [{'InstanceId': 'i-1'}],
+        }
+        with patch.object(m.boto3, 'client', return_value=_asg_client([asg])):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_group_with_no_launch_template_or_configuration_needs_no_extra_call(self):
         # get_asgs() itself is the only boto3.client call needed — no
         # 'ec2' entry in this dict, so a stray describe_launch_template_

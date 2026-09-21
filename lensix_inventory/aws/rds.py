@@ -163,7 +163,8 @@ def gather(region, writer):
                 writer.add_error(region=region, source=f'rds (connections:{iid})', message=e)
         else:
             raw['_ConnectionDatapoints'] = None
-        writer.add_resource(
+        vpc_id = instance.get('DBSubnetGroup', {}).get('VpcId')
+        recorded = writer.add_resource(
             resource_type='rds_instance',
             region=region,
             resource_id=iid,
@@ -171,13 +172,20 @@ def gather(region, writer):
             # DBCluster's DBSubnetGroup is just a name (no VpcId without an
             # extra describe_db_subnet_groups call) — instances embed the
             # full subnet group object, so only instances get scope_id.
-            scope_id=instance.get('DBSubnetGroup', {}).get('VpcId'),
+            scope_id=vpc_id,
             raw=raw,
             # RDS uses TagList, not Tags, across every describe_db_* API —
             # a genuine RDS API naming quirk, not a typo (same kind of
             # inconsistency as EC2 ENIs' own TagSet).
             tags=instance.get('TagList'),
         )
+        if not recorded:
+            continue
+        if vpc_id:
+            writer.add_edge(from_type='rds_instance', from_id=iid, to_type='vpc', to_id=vpc_id, relationship='in_vpc')
+        for sg in instance.get('VpcSecurityGroups', []):
+            if sg.get('VpcSecurityGroupId'):
+                writer.add_edge(from_type='rds_instance', from_id=iid, to_type='security_group', to_id=sg['VpcSecurityGroupId'], relationship='member_of_sg')
 
     try:
         for cluster in get_db_clusters(region):

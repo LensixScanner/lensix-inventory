@@ -118,6 +118,37 @@ class TestGather:
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert calls['classic_load_balancer'].kwargs['tags'] == tags
 
+    def test_a_classic_lb_produces_vpc_security_group_and_instance_edges(self):
+        w = MagicMock()
+        classic_lb = {
+            'LoadBalancerName': 'clb-1', 'VPCId': 'vpc-1', 'SecurityGroups': ['sg-1'],
+            'Instances': [{'InstanceId': 'i-1'}],
+        }
+        client_fn = _clients(classic_lbs=[classic_lb], classic_health=[{'InstanceId': 'i-1', 'State': 'InService'}])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'classic_load_balancer', 'from_id': 'clb-1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'classic_load_balancer', 'from_id': 'clb-1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'classic_load_balancer', 'from_id': 'clb-1', 'to_type': 'ec2_instance', 'to_id': 'i-1', 'relationship': 'routes_to_instance'} in edges
+
+    def test_a_classic_lb_with_no_vpc_sgs_or_instances_produces_no_edges(self):
+        w = MagicMock()
+        classic_lb = {'LoadBalancerName': 'clb-1'}
+        client_fn = _clients(classic_lbs=[classic_lb])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_classic_lb_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        classic_lb = {'LoadBalancerName': 'clb-1', 'VPCId': 'vpc-1', 'SecurityGroups': ['sg-1']}
+        client_fn = _clients(classic_lbs=[classic_lb])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
     def test_a_classic_lbs_failure_does_not_prevent_modern_lbs_from_being_gathered(self):
         w = MagicMock()
         modern_lb = {'LoadBalancerName': 'alb-1', 'LoadBalancerArn': 'arn:alb-1', 'Type': 'network'}
@@ -152,6 +183,45 @@ class TestGather:
         assert tg_record['_Attributes'] == {'deregistration_delay.timeout_seconds': '300'}
         assert tg_record['_TargetHealthDescriptions'] == [{'Target': {'Id': 'i-1'}}]
         assert '_WebACL' not in lb_call.kwargs['raw']
+
+    def test_a_modern_lb_produces_vpc_security_group_and_target_group_edges(self):
+        w = MagicMock()
+        modern_lb = {'LoadBalancerName': 'nlb-1', 'LoadBalancerArn': 'arn:nlb-1', 'VpcId': 'vpc-1', 'SecurityGroups': ['sg-1'], 'Type': 'network'}
+        tg = {'TargetGroupArn': 'arn:tg-1', 'TargetGroupName': 'tg-1'}
+        client_fn = _clients(modern_lbs=[modern_lb], target_groups_by_arn={'arn:nlb-1': [tg]})
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'load_balancer', 'from_id': 'arn:nlb-1', 'to_type': 'vpc', 'to_id': 'vpc-1', 'relationship': 'in_vpc'} in edges
+        assert {'from_type': 'load_balancer', 'from_id': 'arn:nlb-1', 'to_type': 'security_group', 'to_id': 'sg-1', 'relationship': 'member_of_sg'} in edges
+        assert {'from_type': 'load_balancer', 'from_id': 'arn:nlb-1', 'to_type': 'target_group', 'to_id': 'arn:tg-1', 'relationship': 'routes_to'} in edges
+
+    def test_a_fully_suppressed_modern_lb_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        modern_lb = {'LoadBalancerName': 'nlb-1', 'LoadBalancerArn': 'arn:nlb-1', 'VpcId': 'vpc-1', 'SecurityGroups': ['sg-1'], 'Type': 'network'}
+        client_fn = _clients(modern_lbs=[modern_lb])
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_target_group_produces_instance_and_lambda_edges(self):
+        w = MagicMock()
+        tg = {'TargetGroupArn': 'arn:tg-1', 'TargetGroupName': 'tg-1'}
+        client_fn = _clients(
+            all_target_groups=[tg],
+            target_health_by_arn={'arn:tg-1': [
+                {'Target': {'Id': 'i-1'}},
+                {'Target': {'Id': 'arn:aws:lambda:us-east-1:1:function:my-fn'}},
+                {'Target': {'Id': '10.0.0.1'}},  # IP-type target -- not tracked, no edge
+            ]},
+        )
+        with patch.object(m.boto3, 'client', side_effect=client_fn):
+            m.gather('us-east-1', w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {'from_type': 'target_group', 'from_id': 'arn:tg-1', 'to_type': 'ec2_instance', 'to_id': 'i-1', 'relationship': 'routes_to_instance'} in edges
+        assert {'from_type': 'target_group', 'from_id': 'arn:tg-1', 'to_type': 'lambda_function', 'to_id': 'arn:aws:lambda:us-east-1:1:function:my-fn', 'relationship': 'routes_to_function'} in edges
+        assert len(edges) == 2
 
     def test_modern_lb_tags_are_passed_through_for_suppression(self):
         w = MagicMock()
