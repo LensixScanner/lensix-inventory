@@ -5,12 +5,15 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.azure.redis as m
 
 
-def _cache(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Cache/Redis/c1', name='c1'):
+def _cache(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Cache/Redis/c1', name='c1', subnet_id=None):
     cache = MagicMock()
     cache.location = location
     cache.id = rid
     cache.name = name
-    cache.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if subnet_id is not None:
+        raw['subnet_id'] = subnet_id
+    cache.as_dict.return_value = raw
     return cache
 
 
@@ -65,3 +68,36 @@ class TestGather:
         with patch('azure.mgmt.redis.RedisManagementClient', return_value=client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_cache_with_vnet_injection_gets_an_in_subnet_edge(self):
+        w = MagicMock()
+        cache = _cache(subnet_id='/subscriptions/s1/.../subnets/redis-subnet')
+        client = MagicMock()
+        client.redis.list.return_value = [cache]
+        with patch('azure.mgmt.redis.RedisManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='redis_cache', from_id=cache.id, to_type='subnet',
+            to_id='/subscriptions/s1/.../subnets/redis-subnet', relationship='in_subnet',
+        )
+
+    def test_a_cache_with_no_vnet_injection_gets_no_edge(self):
+        w = MagicMock()
+        cache = _cache()
+        client = MagicMock()
+        client.redis.list.return_value = [cache]
+        with patch('azure.mgmt.redis.RedisManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_cache_gets_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        cache = _cache(subnet_id='/subscriptions/s1/.../subnets/redis-subnet')
+        client = MagicMock()
+        client.redis.list.return_value = [cache]
+        with patch('azure.mgmt.redis.RedisManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()

@@ -162,12 +162,10 @@ class TestGather:
     def test_a_bucket_list_failure_does_not_prevent_the_others(self):
         w = MagicMock()
         build = _clients(log_sinks=[{'name': 'projects/p/sinks/s1'}])
-        logging_api_holder = {}
 
         def _build(service, version, credentials):
             c = build(service, version, credentials)
             if service == 'logging':
-                logging_api_holder['api'] = c
                 c.projects.return_value.locations.return_value.buckets.return_value.list.return_value.execute.side_effect = RuntimeError('boom')
             return c
         with patch.object(m.discovery, 'build', side_effect=_build):
@@ -175,3 +173,64 @@ class TestGather:
         assert any(c.kwargs['source'] == 'log_bucket' for c in w.add_error.call_args_list)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert 'log_sink' in calls
+
+
+class TestEdgeForSinkDestination:
+    def test_storage_destination_maps_to_the_bare_bucket_name(self):
+        assert m._edge_for_sink_destination('storage.googleapis.com/my-bucket') == ('storage_bucket', 'my-bucket')
+
+    def test_bigquery_destination_maps_to_the_bare_dataset_id(self):
+        assert m._edge_for_sink_destination('bigquery.googleapis.com/projects/p/datasets/my_dataset') == ('bigquery_dataset', 'my_dataset')
+
+    def test_pubsub_destination_maps_to_the_full_topic_path(self):
+        assert m._edge_for_sink_destination('pubsub.googleapis.com/projects/p/topics/t1') == ('pubsub_topic', 'projects/p/topics/t1')
+
+    def test_logging_bucket_destination_maps_to_the_full_bucket_path(self):
+        assert m._edge_for_sink_destination('logging.googleapis.com/projects/p/locations/global/buckets/b1') == ('log_bucket', 'projects/p/locations/global/buckets/b1')
+
+    def test_bare_logging_project_destination_with_no_bucket_maps_to_nothing(self):
+        assert m._edge_for_sink_destination('logging.googleapis.com/projects/p') == (None, None)
+
+    def test_unrecognized_destination_maps_to_nothing(self):
+        assert m._edge_for_sink_destination('') == (None, None)
+
+
+class TestGatherEdges:
+    def test_a_storage_destination_sink_produces_an_exports_to_edge(self):
+        w = MagicMock()
+        build = _clients(log_sinks=[{'name': 'projects/p/sinks/s1', 'destination': 'storage.googleapis.com/my-bucket'}])
+        with patch.object(m.discovery, 'build', side_effect=build):
+            m.gather('p', MagicMock(), w)
+        w.add_edge.assert_called_once_with(
+            from_type='log_sink', from_id='projects/p/sinks/s1',
+            to_type='storage_bucket', to_id='my-bucket', relationship='exports_to',
+        )
+
+    def test_a_pubsub_destination_sink_produces_an_exports_to_edge(self):
+        w = MagicMock()
+        build = _clients(log_sinks=[{'name': 'projects/p/sinks/s1', 'destination': 'pubsub.googleapis.com/projects/p/topics/t1'}])
+        with patch.object(m.discovery, 'build', side_effect=build):
+            m.gather('p', MagicMock(), w)
+        w.add_edge.assert_called_once_with(
+            from_type='log_sink', from_id='projects/p/sinks/s1',
+            to_type='pubsub_topic', to_id='projects/p/topics/t1', relationship='exports_to',
+        )
+
+    def test_a_bare_logging_destination_produces_no_edge(self):
+        w = MagicMock()
+        build = _clients(log_sinks=[{'name': 'projects/p/sinks/s1', 'destination': 'logging.googleapis.com/projects/p'}])
+        with patch.object(m.discovery, 'build', side_effect=build):
+            m.gather('p', MagicMock(), w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_sink_produces_no_edge(self):
+        # LogSink has no labels field at all (see module docstring), so
+        # full suppression can never actually trigger here in practice --
+        # exercised defensively anyway, same discipline as every other
+        # migrated module this effort.
+        w = MagicMock()
+        w.add_resource.return_value = False
+        build = _clients(log_sinks=[{'name': 'projects/p/sinks/s1', 'destination': 'storage.googleapis.com/my-bucket'}])
+        with patch.object(m.discovery, 'build', side_effect=build):
+            m.gather('p', MagicMock(), w)
+        w.add_edge.assert_not_called()

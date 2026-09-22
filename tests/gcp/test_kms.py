@@ -104,3 +104,38 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=kms):
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_crypto_key_produces_an_in_keyring_edge(self):
+        loc = _location()
+        ring = _key_ring()
+        key = _crypto_key()
+        kms = _kms_client([loc], {loc['name']: [ring]}, {ring['name']: [key]})
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=kms):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='kms_crypto_key', from_id=key['name'],
+            to_type='kms_keyring', to_id=ring['name'], relationship='in_keyring',
+        )
+
+    def test_no_crypto_keys_produces_no_edges(self):
+        loc = _location()
+        ring = _key_ring()
+        kms = _kms_client([loc], {loc['name']: [ring]}, {})
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=kms):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_crypto_key_produces_no_edge(self):
+        loc = _location()
+        ring = _key_ring()
+        key = _crypto_key(labels={'lensix-suppress': 'true'})
+        kms = _kms_client([loc], {loc['name']: [ring]}, {ring['name']: [key]})
+        writer = MagicMock()
+        writer.add_resource.side_effect = lambda **kw: kw['resource_type'] != 'kms_crypto_key'
+        with patch.object(m.discovery, 'build', return_value=kms):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

@@ -54,7 +54,7 @@ def gather(project_id, credentials, writer):
             writer.add_error(region='global', source=f'secretmanager_secret:{name}', message=e)
             raw['_Versions'] = []
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='secretmanager_secret',
             region='global',
             resource_id=name,
@@ -62,3 +62,19 @@ def gather(project_id, credentials, writer):
             raw=raw,
             tags=raw.get('labels'),
         )
+        if recorded:
+            # customerManagedEncryption.kmsKeyName is always the
+            # fully-qualified KMS resource name (confirmed against the
+            # real discovery document schema, same convention as every
+            # other GCP CMEK field) — matches kms_crypto_key's own
+            # resource_id exactly, no name-based resolution needed. Can
+            # appear under EITHER replication policy shape (automatic, or
+            # one entry per region under userManaged) — never both.
+            replication = secret.get('replication') or {}
+            automatic_key = (replication.get('automatic') or {}).get('customerManagedEncryption', {}).get('kmsKeyName')
+            if automatic_key:
+                writer.add_edge(from_type='secretmanager_secret', from_id=name, to_type='kms_crypto_key', to_id=automatic_key, relationship='uses_cmek')
+            for replica in (replication.get('userManaged') or {}).get('replicas', []):
+                replica_key = (replica.get('customerManagedEncryption') or {}).get('kmsKeyName')
+                if replica_key:
+                    writer.add_edge(from_type='secretmanager_secret', from_id=name, to_type='kms_crypto_key', to_id=replica_key, relationship='uses_cmek')

@@ -5,12 +5,16 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.azure.policy as m
 
 
-def _assignment(display_name='Allowed locations', rid='/subscriptions/s1/providers/Microsoft.Authorization/policyAssignments/pa1', name='pa1'):
+def _assignment(display_name='Allowed locations', rid='/subscriptions/s1/providers/Microsoft.Authorization/policyAssignments/pa1', name='pa1',
+                 scope=None):
     a = MagicMock()
     a.display_name = display_name
     a.id = rid
     a.name = name
-    a.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if scope is not None:
+        raw['scope'] = scope
+    a.as_dict.return_value = raw
     return a
 
 
@@ -56,3 +60,43 @@ class TestGather:
         with patch('azure.mgmt.resource.PolicyClient', return_value=client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def _gather(self, assignment, w=None):
+        w = w or MagicMock()
+        client = MagicMock()
+        client.policy_assignments.list.return_value = [assignment]
+        with patch('azure.mgmt.resource.PolicyClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        return w
+
+    def test_a_resource_group_scoped_assignment_gets_an_applies_to_edge(self):
+        assignment = _assignment(scope='/subscriptions/s1/resourceGroups/my-rg')
+        w = self._gather(assignment)
+        w.add_edge.assert_called_once_with(
+            from_type='policy_assignment', from_id=assignment.id, to_type='resource_group',
+            to_id='/subscriptions/s1/resourceGroups/my-rg', relationship='applies_to',
+        )
+
+    def test_a_subscription_scoped_assignment_gets_no_edge(self):
+        assignment = _assignment(scope='/subscriptions/s1')
+        w = self._gather(assignment)
+        w.add_edge.assert_not_called()
+
+    def test_a_resource_scoped_assignment_gets_no_edge(self):
+        assignment = _assignment(scope='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Storage/storageAccounts/sa1')
+        w = self._gather(assignment)
+        w.add_edge.assert_not_called()
+
+    def test_no_scope_gets_no_edge(self):
+        assignment = _assignment()
+        w = self._gather(assignment)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_assignment_gets_no_edge(self):
+        assignment = _assignment(scope='/subscriptions/s1/resourceGroups/my-rg')
+        w = MagicMock()
+        w.add_resource.return_value = False
+        self._gather(assignment, w=w)
+        w.add_edge.assert_not_called()

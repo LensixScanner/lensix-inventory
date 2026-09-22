@@ -13,13 +13,16 @@ import lensix_inventory.azure.appservice as m
 
 
 def _app(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Web/sites/app1',
-         name='app1', kind='app', tags=None):
+         name='app1', kind='app', tags=None, subnet_id=None):
     app = MagicMock()
     app.id = rid
     app.location = location
     app.name = name
     app.kind = kind
-    app.as_dict.return_value = {'id': rid, 'name': name, 'kind': kind, 'tags': tags}
+    raw = {'id': rid, 'name': name, 'kind': kind, 'tags': tags}
+    if subnet_id is not None:
+        raw['virtual_network_subnet_id'] = subnet_id
+    app.as_dict.return_value = raw
     return app
 
 
@@ -88,3 +91,33 @@ class TestGather:
         with patch.object(m, 'WebSiteManagementClient', return_value=client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_an_app_with_vnet_integration_gets_an_in_subnet_edge(self):
+        w = MagicMock()
+        app = _app(subnet_id='/subscriptions/s1/.../subnets/app-subnet')
+        client = _client([app])
+        with patch.object(m, 'WebSiteManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='app_service', from_id=app.id, to_type='subnet',
+            to_id='/subscriptions/s1/.../subnets/app-subnet', relationship='in_subnet',
+        )
+
+    def test_an_app_with_no_vnet_integration_gets_no_edge(self):
+        w = MagicMock()
+        app = _app()
+        client = _client([app])
+        with patch.object(m, 'WebSiteManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_app_gets_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        app = _app(subnet_id='/subscriptions/s1/.../subnets/app-subnet')
+        client = _client([app])
+        with patch.object(m, 'WebSiteManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()

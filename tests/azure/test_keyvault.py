@@ -11,13 +11,17 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.azure.keyvault as m
 
 
-def _vault(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/v1', name='v1'):
+def _vault(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/v1', name='v1',
+           vnet_rule_subnet_ids=None):
     vault = MagicMock()
     vault.location = location
     vault.id = rid
     vault.name = name
     vault.properties.vault_uri = 'https://v1.vault.azure.net/'
-    vault.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if vnet_rule_subnet_ids is not None:
+        raw['properties'] = {'network_acls': {'virtual_network_rules': [{'id': sid} for sid in vnet_rule_subnet_ids]}}
+    vault.as_dict.return_value = raw
     return vault
 
 
@@ -90,3 +94,41 @@ class TestGather:
         with patch('azure.mgmt.keyvault.KeyVaultManagementClient', return_value=kv_mgmt):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def _gather(self, vault, w=None):
+        w = w or MagicMock()
+        kv_mgmt, key_client, secret_client, monitor = _clients()
+        kv_mgmt.vaults.list.return_value = [vault]
+        with patch('azure.mgmt.keyvault.KeyVaultManagementClient', return_value=kv_mgmt), \
+             patch('azure.keyvault.keys.KeyClient', return_value=key_client), \
+             patch('azure.keyvault.secrets.SecretClient', return_value=secret_client), \
+             patch('azure.mgmt.monitor.MonitorManagementClient', return_value=monitor):
+            m.gather('cred', 'sub-1', w)
+        return w
+
+    def test_a_vnet_rule_gets_an_in_subnet_edge(self):
+        vault = _vault(vnet_rule_subnet_ids=['subnet-1'])
+        w = self._gather(vault)
+        w.add_edge.assert_called_once_with(
+            from_type='key_vault', from_id=vault.id, to_type='subnet', to_id='subnet-1', relationship='in_subnet',
+        )
+
+    def test_multiple_vnet_rules_each_get_their_own_edge(self):
+        vault = _vault(vnet_rule_subnet_ids=['subnet-1', 'subnet-2'])
+        w = self._gather(vault)
+        to_ids = {c.kwargs['to_id'] for c in w.add_edge.call_args_list}
+        assert to_ids == {'subnet-1', 'subnet-2'}
+
+    def test_no_vnet_rules_gets_no_edges(self):
+        vault = _vault()
+        w = self._gather(vault)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_vault_gets_no_edges(self):
+        vault = _vault(vnet_rule_subnet_ids=['subnet-1'])
+        w = MagicMock()
+        w.add_resource.return_value = False
+        self._gather(vault, w=w)
+        w.add_edge.assert_not_called()

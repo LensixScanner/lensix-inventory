@@ -9,10 +9,12 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.storage as m
 
 
-def _bucket(*, name='prod-assets', location='US', labels=None):
+def _bucket(*, name='prod-assets', location='US', labels=None, kms_key=None):
     b = {'name': name, 'location': location}
     if labels is not None:
         b['labels'] = labels
+    if kms_key is not None:
+        b['encryption'] = {'defaultKmsKeyName': kms_key}
     return b
 
 
@@ -87,3 +89,34 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=storage):
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_cmek_bucket_produces_a_uses_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        bucket = _bucket(kms_key=kms_key)
+        storage = _storage_client([bucket])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=storage):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='storage_bucket', from_id='prod-assets',
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_google_managed_bucket_produces_no_edge(self):
+        storage = _storage_client([_bucket()])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=storage):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_bucket_produces_no_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        bucket = _bucket(kms_key=kms_key, labels={'lensix-suppress': 'true'})
+        storage = _storage_client([bucket])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=storage):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

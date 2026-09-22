@@ -4,10 +4,36 @@ Only the data-fetching calls are included here (network_watchers.list_all,
 flow_logs.list) — flow-log retention-threshold evaluation is left
 server-side.
 
+Edges: flow_log -> storage_account (exports_to) via `storage_id`
+(already embedded, no extra call); flow_log -> {nsg|virtual_network|
+subnet} (monitors) via `target_resource_id` — flow logs can target any
+of the three depending on API version/scope, so the target TYPE is
+sniffed from its own ARM path segment (".../networkSecurityGroups/...",
+".../virtualNetworks/.../subnets/...", or ".../virtualNetworks/..."
+alone) rather than assumed to always be an NSG. Both emitted as read —
+each endpoint is owned by a different module's own gather() (storage.py,
+nsg.py, network.py), separate modules/containers (see network.py's own
+docstring for this general pattern).
+
 Requires: azure-mgmt-network.
 """
 
+import re
+
 from ._util import resource_group as _resource_group
+
+_TARGET_TYPE_PATTERNS = (
+    (re.compile(r'/subnets/[^/]+$', re.IGNORECASE), 'subnet'),
+    (re.compile(r'/networkSecurityGroups/[^/]+$', re.IGNORECASE), 'nsg'),
+    (re.compile(r'/virtualNetworks/[^/]+$', re.IGNORECASE), 'virtual_network'),
+)
+
+
+def _target_resource_type(target_resource_id):
+    for pattern, resource_type in _TARGET_TYPE_PATTERNS:
+        if pattern.search(target_resource_id):
+            return resource_type
+    return None
 
 def get_network_watchers(credential, subscription_id):
     from azure.mgmt.network import NetworkManagementClient
@@ -50,7 +76,7 @@ def gather(credential, subscription_id, writer):
 
         for fl in flow_logs:
             fl_raw = fl.as_dict()
-            writer.add_resource(
+            added = writer.add_resource(
                 resource_type='flow_log',
                 region=region,
                 resource_id=fl.id,
@@ -59,3 +85,12 @@ def gather(credential, subscription_id, writer):
                 raw=fl_raw,
                 tags=fl_raw.get('tags'),
             )
+            if added:
+                storage_id = fl_raw.get('storage_id')
+                if storage_id:
+                    writer.add_edge(from_type='flow_log', from_id=fl.id, to_type='storage_account', to_id=storage_id, relationship='exports_to')
+                target_resource_id = fl_raw.get('target_resource_id')
+                if target_resource_id:
+                    target_type = _target_resource_type(target_resource_id)
+                    if target_type:
+                        writer.add_edge(from_type='flow_log', from_id=fl.id, to_type=target_type, to_id=target_resource_id, relationship='monitors')

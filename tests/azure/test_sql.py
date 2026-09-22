@@ -31,6 +31,12 @@ def _rule(rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Sql/se
     return rule
 
 
+def _vnet_rule(subnet_id='/subscriptions/s1/.../subnets/sql-subnet'):
+    rule = MagicMock()
+    rule.virtual_network_subnet_id = subnet_id
+    return rule
+
+
 class TestGather:
     def test_adds_one_resource_per_server_and_rule(self):
         w = MagicMock()
@@ -97,3 +103,63 @@ class TestGather:
         with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherVnetRuleEdges:
+    def _sql_client(self, server, vnet_rules=None):
+        sql_client = MagicMock()
+        sql_client.servers.list.return_value = [server]
+        sql_client.server_security_alert_policies.get.side_effect = Exception('none')
+        sql_client.server_blob_auditing_policies.get.side_effect = Exception('none')
+        sql_client.firewall_rules.list_by_server.return_value = []
+        sql_client.virtual_network_rules.list_by_server.return_value = vnet_rules or []
+        return sql_client
+
+    def test_a_vnet_rule_gets_an_in_subnet_edge(self):
+        w = MagicMock()
+        server = _server()
+        sql_client = self._sql_client(server, [_vnet_rule(subnet_id='subnet-1')])
+        with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='sql_server', from_id=server.id, to_type='subnet', to_id='subnet-1', relationship='in_subnet',
+        )
+
+    def test_multiple_vnet_rules_each_get_their_own_edge(self):
+        w = MagicMock()
+        server = _server()
+        sql_client = self._sql_client(server, [_vnet_rule(subnet_id='subnet-1'), _vnet_rule(subnet_id='subnet-2')])
+        with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
+            m.gather('cred', 'sub-1', w)
+        to_ids = {c.kwargs['to_id'] for c in w.add_edge.call_args_list}
+        assert to_ids == {'subnet-1', 'subnet-2'}
+
+    def test_no_vnet_rules_gets_no_edges(self):
+        w = MagicMock()
+        server = _server()
+        sql_client = self._sql_client(server, [])
+        with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_vnet_rules_list_failure_is_recorded_and_gather_continues(self):
+        w = MagicMock()
+        server = _server()
+        sql_client = self._sql_client(server)
+        sql_client.virtual_network_rules.list_by_server.side_effect = RuntimeError('boom')
+        with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
+            m.gather('cred', 'sub-1', w)
+        assert any(c.kwargs['source'] == 'sql:vnet_rules:s1' for c in w.add_error.call_args_list)
+        w.add_edge.assert_not_called()
+        # The server resource itself, and its (empty) firewall-rule fetch,
+        # still succeed — one VNet-rule fetch failure doesn't abort gather().
+        assert w.add_resource.call_count == 1
+
+    def test_a_fully_suppressed_server_gets_no_vnet_rule_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        server = _server()
+        sql_client = self._sql_client(server, [_vnet_rule(subnet_id='subnet-1')])
+        with patch('azure.mgmt.sql.SqlManagementClient', return_value=sql_client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()

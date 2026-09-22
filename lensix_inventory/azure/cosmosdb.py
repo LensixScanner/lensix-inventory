@@ -6,6 +6,17 @@ Threat-protection status needs a per-account sub-call —
 `SecurityCenter.advanced_threat_protection.get(resource_id=...)` — a plain
 get call, so it's included too and merged into each account's raw record
 as `_AdvancedThreatProtection`.
+
+Edges: cosmosdb_account -> subnet (in_subnet), one per
+virtual_network_rules[] entry — already embedded in the account's own
+list() response (unlike sql.py's own VNet rules, no extra API call is
+needed here; VirtualNetworkRule.id here IS the subnet's own ARM id
+directly, not a nested SubResource). private_endpoint_connections[] has
+no persisted target to join to (nothing in this codebase gathers
+`private_endpoint` as its own resource type), so that's skipped, same
+reasoning as appservice.py's own app_service_plan note. Emitted as read —
+the subnet endpoint is owned by network.py's own gather(), a separate
+module/container (see network.py's own docstring for this pattern).
 """
 
 from azure.mgmt.cosmosdb import CosmosDBManagementClient
@@ -33,7 +44,7 @@ def gather(credential, subscription_id, writer):
             credential, subscription_id, account.id
         )
 
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='cosmosdb_account',
             region=account.location or 'global',
             resource_id=account.id,
@@ -42,3 +53,8 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            for vnet_rule in (raw.get('virtual_network_rules') or []):
+                subnet_id = vnet_rule.get('id')
+                if subnet_id:
+                    writer.add_edge(from_type='cosmosdb_account', from_id=account.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

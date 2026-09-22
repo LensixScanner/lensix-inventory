@@ -160,3 +160,69 @@ class TestGetProtectedVmResourceIds:
                 assert False, 'expected RuntimeError'
             except RuntimeError:
                 pass
+
+
+class TestGetProtectedVmResourceIdsEdges:
+    """The writer= param is optional — omitting it (the default, tested
+    throughout TestGetProtectedVmResourceIds above) must not change the
+    returned set at all; passing it additionally emits protects edges."""
+
+    def test_no_writer_emits_no_edges_and_the_set_is_unchanged(self):
+        vault = _vault()
+        backup_client = MagicMock()
+        backup_client.backup_protected_items.list.return_value = [
+            _protected_item('/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM1'),
+        ]
+        with patch('azure.mgmt.recoveryservicesbackup.RecoveryServicesBackupClient', return_value=backup_client):
+            ids = m.get_protected_vm_resource_ids('cred', 'sub-1', [vault])
+        assert ids == {'/subscriptions/s1/resourcegroups/rg/providers/microsoft.compute/virtualmachines/vm1'}
+
+    def test_a_writer_gets_a_protects_edge_per_protected_item(self):
+        vault = _vault(rid='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.RecoveryServices/vaults/v1', name='v1')
+        w = MagicMock()
+        backup_client = MagicMock()
+        backup_client.backup_protected_items.list.return_value = [
+            _protected_item('/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM1'),
+        ]
+        with patch('azure.mgmt.recoveryservicesbackup.RecoveryServicesBackupClient', return_value=backup_client):
+            ids = m.get_protected_vm_resource_ids('cred', 'sub-1', [vault], writer=w)
+        w.add_edge.assert_called_once_with(
+            from_type='recovery_services_vault', from_id=vault.id, to_type='vm',
+            to_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM1',
+            relationship='protects',
+        )
+        # The returned set is still lowercased, unaffected by the edge's
+        # own (as-read, not normalized) to_id — different consumers, same
+        # underlying data.
+        assert ids == {'/subscriptions/s1/resourcegroups/rg/providers/microsoft.compute/virtualmachines/vm1'}
+
+    def test_edges_are_attributed_to_the_correct_vault_not_unioned(self):
+        # The bug get_protected_vm_resource_ids' own flat set has, that
+        # this writer= path exists specifically to avoid: which vault
+        # protects which VM.
+        vault1 = _vault(rid='/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.RecoveryServices/vaults/v1', name='v1')
+        vault2 = _vault(rid='/subscriptions/s1/resourceGroups/rg2/providers/Microsoft.RecoveryServices/vaults/v2', name='v2')
+        w = MagicMock()
+        backup_client = MagicMock()
+
+        def _list(vault_name, resource_group_name, **kw):
+            if vault_name == 'v1':
+                return [_protected_item('/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM1')]
+            return [_protected_item('/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM2')]
+        backup_client.backup_protected_items.list.side_effect = _list
+        with patch('azure.mgmt.recoveryservicesbackup.RecoveryServicesBackupClient', return_value=backup_client):
+            m.get_protected_vm_resource_ids('cred', 'sub-1', [vault1, vault2], writer=w)
+        edges_by_from = {c.kwargs['from_id']: c.kwargs['to_id'] for c in w.add_edge.call_args_list}
+        assert edges_by_from[vault1.id] == '/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM1'
+        assert edges_by_from[vault2.id] == '/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/VM2'
+
+    def test_an_item_without_source_resource_id_gets_no_edge(self):
+        vault = _vault()
+        w = MagicMock()
+        item = MagicMock()
+        item.properties.source_resource_id = None
+        backup_client = MagicMock()
+        backup_client.backup_protected_items.list.return_value = [item]
+        with patch('azure.mgmt.recoveryservicesbackup.RecoveryServicesBackupClient', return_value=backup_client):
+            m.get_protected_vm_resource_ids('cred', 'sub-1', [vault], writer=w)
+        w.add_edge.assert_not_called()

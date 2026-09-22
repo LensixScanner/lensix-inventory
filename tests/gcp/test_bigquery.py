@@ -13,10 +13,12 @@ def _ref(dataset_id='ds1'):
     return {'datasetReference': {'datasetId': dataset_id}}
 
 
-def _dataset(*, dataset_id='ds1', location='US', labels=None):
+def _dataset(*, dataset_id='ds1', location='US', labels=None, kms_key=None):
     d = {'datasetReference': {'datasetId': dataset_id}, 'location': location}
     if labels is not None:
         d['labels'] = labels
+    if kms_key is not None:
+        d['defaultEncryptionConfiguration'] = {'kmsKeyName': kms_key}
     return d
 
 
@@ -109,3 +111,35 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=bq):
             m.gather('my-proj', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_cmek_dataset_produces_a_uses_cmek_edge(self):
+        ref = _ref()
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        bq = _bq_client([ref], {'ds1': _dataset(kms_key=kms_key)})
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=bq):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='bigquery_dataset', from_id='ds1',
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_google_managed_dataset_produces_no_edge(self):
+        ref = _ref()
+        bq = _bq_client([ref], {'ds1': _dataset()})
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=bq):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_dataset_produces_no_edge(self):
+        ref = _ref()
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        bq = _bq_client([ref], {'ds1': _dataset(kms_key=kms_key, labels={'lensix-suppress': 'true'})})
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=bq):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

@@ -15,7 +15,7 @@ import lensix_inventory.azure.vm as m
 
 
 def _vm(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Compute/virtualMachines/vm1',
-        name='vm1', tags=None, custom_data=None, windows_auto_update=None):
+        name='vm1', tags=None, custom_data=None, windows_auto_update=None, nic_ids=None):
     vm = MagicMock()
     vm.location = location
     vm.id = rid
@@ -24,6 +24,8 @@ def _vm(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers
     raw = {'id': rid, 'name': name, 'tags': tags}
     if windows_auto_update is not None:
         raw['os_profile'] = {'windows_configuration': {'enable_automatic_updates': windows_auto_update}}
+    if nic_ids is not None:
+        raw['network_profile'] = {'network_interfaces': [{'id': nic_id} for nic_id in nic_ids]}
     vm.as_dict.return_value = raw
     return vm
 
@@ -130,6 +132,39 @@ class TestGather:
         w.add_resource.assert_not_called()
 
 
+class TestGatherNicEdges:
+    def test_a_vm_gets_an_attached_to_nic_edge_per_network_interface(self):
+        w = MagicMock()
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [_vm(nic_ids=['nic-1', 'nic-2'])]
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = w.add_edge.call_args_list
+        assert len(edge_calls) == 2
+        assert edge_calls[0].kwargs == {
+            'from_type': 'vm', 'from_id': '/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Compute/virtualMachines/vm1',
+            'to_type': 'network_interface', 'to_id': 'nic-1', 'relationship': 'attached_to_nic',
+        }
+        assert edge_calls[1].kwargs['to_id'] == 'nic-2'
+
+    def test_a_vm_with_no_network_profile_gets_no_edges(self):
+        w = MagicMock()
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [_vm()]
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_vm_gets_no_nic_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [_vm(nic_ids=['nic-1'])]
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+
 class TestGatherProtectedByAzureBackup:
     """gather()'s _ProtectedByAzureBackup stamping — Workstream 3."""
 
@@ -186,6 +221,20 @@ class TestGatherProtectedByAzureBackup:
         raws = [c.kwargs['raw'] for c in w.add_resource.call_args_list]
         assert raws[0]['_ProtectedByAzureBackup'] is True
         assert raws[1]['_ProtectedByAzureBackup'] is False
+
+    def test_the_gather_writer_is_forwarded_so_protects_edges_can_be_emitted(self):
+        # get_protected_vm_resource_ids() itself only emits edges when
+        # given a writer (see its own tests in test_rsv.py) — this just
+        # confirms gather() actually passes its OWN writer through,
+        # rather than silently omitting it.
+        w = MagicMock()
+        client = _empty_client()
+        get_protected = MagicMock(return_value=set())
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._rsv, 'get_vaults', return_value=['vault1']), \
+             patch.object(m._rsv, 'get_protected_vm_resource_ids', get_protected):
+            m.gather('cred', 'sub-1', w)
+        assert get_protected.call_args.kwargs['writer'] is w
 
 
 class TestGatherMaintenanceConfigurationAssignment:

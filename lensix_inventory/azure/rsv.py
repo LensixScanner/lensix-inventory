@@ -34,7 +34,7 @@ def get_diagnostic_settings(monitor_client, resource_uri):
         return []
 
 
-def get_protected_vm_resource_ids(credential, subscription_id, vaults):
+def get_protected_vm_resource_ids(credential, subscription_id, vaults, writer=None):
     """Every VM's own ARM resource ID (lowercased, for case-insensitive
     comparison) that is protected by ANY of the given already-gathered
     Recovery Services vaults — one
@@ -47,6 +47,19 @@ def get_protected_vm_resource_ids(credential, subscription_id, vaults):
     vault, matching this codebase's established "per-management-object,
     not per-leaf-resource" cost discipline (e.g. autoscaling.py's own
     get_scheduled_actions in the AWS side of this project).
+
+    When `writer` is given, also emits recovery_services_vault -> vm
+    (protects) edges — one per protected item, using the SAME per-vault
+    fetch this function already makes for the flat set below (no extra
+    API calls). Called from vm.py's own gather(), not this module's own
+    (this function's own per-vault loop is the only place that knows
+    WHICH vault protects a given VM; the flat set returned below loses
+    that attribution, which is fine for the boolean
+    _ProtectedByAzureBackup stamp but not for a real edge). The vault
+    endpoint isn't persisted by vm.py's own gather() (that's rsv.py's own
+    concern — vm.py never gathers Recovery Services vaults itself), so
+    this is a cross-module edge, same shape as vm.py's own
+    vm -> network_interface edge to a resource defender.py owns.
 
     Reads each protected item's `.properties.source_resource_id`
     (verified field on the ProtectedItem base class — and its
@@ -78,6 +91,8 @@ def get_protected_vm_resource_ids(credential, subscription_id, vaults):
             source_resource_id = getattr(props, 'source_resource_id', None) if props else None
             if source_resource_id:
                 protected_ids.add(source_resource_id.lower())
+                if writer is not None:
+                    writer.add_edge(from_type='recovery_services_vault', from_id=vault.id, to_type='vm', to_id=source_resource_id, relationship='protects')
     return protected_ids
 
 

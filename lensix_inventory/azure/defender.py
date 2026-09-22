@@ -19,6 +19,16 @@ own id/name, gathered here as `defender_pricing` and `network_interface`
 resources so Lensix can evaluate Defender-related findings server-side
 from an uploaded inventory file.
 
+Edges: network_interface -> subnet (in_subnet), one per
+ip_configurations[] entry that has one (a NIC can carry more than one IP
+config); network_interface -> nsg (associated_with_nsg) when the NIC has
+its own NSG (independent of, and in addition to, any NSG associated with
+the NIC's subnet — see network.py's own subnet -> nsg edge). Both
+endpoints (subnet, nsg) are owned by network.py/nsg.py's own gather()
+calls, not this one, so — same as network.py's own vnet_peering ->
+virtual_network remote-side edge — these are emitted as read, with no
+same-run id list to case-resolve against.
+
 A third helper, `get_public_ip_addresses()`, lives here too (same
 subscription-wide-list-client pattern as the two above) but is NOT called
 from `gather()` — it exists for `azure/scanmodules/vm_checks.py` to resolve
@@ -81,7 +91,7 @@ def gather(credential, subscription_id, writer):
 
     for nic in nics:
         nic_raw = _as_dict(nic)
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='network_interface',
             region=nic.location or 'global',
             resource_id=nic.id,
@@ -90,3 +100,11 @@ def gather(credential, subscription_id, writer):
             raw=nic_raw,
             tags=nic_raw.get('tags'),
         )
+        if added:
+            for ip_config in (nic_raw.get('ip_configurations') or []):
+                subnet_id = (ip_config.get('subnet') or {}).get('id')
+                if subnet_id:
+                    writer.add_edge(from_type='network_interface', from_id=nic.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            nsg_id = (nic_raw.get('network_security_group') or {}).get('id')
+            if nsg_id:
+                writer.add_edge(from_type='network_interface', from_id=nic.id, to_type='nsg', to_id=nsg_id, relationship='associated_with_nsg')

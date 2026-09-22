@@ -24,11 +24,16 @@ def _watcher(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/prov
 
 
 def _flow_log(rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/networkWatchers/nw1/flowLogs/fl1',
-              name='fl1', tags=None):
+              name='fl1', tags=None, storage_id=None, target_resource_id=None):
     fl = MagicMock()
     fl.id = rid
     fl.name = name
-    fl.as_dict.return_value = {'id': rid, 'name': name, 'tags': tags}
+    raw = {'id': rid, 'name': name, 'tags': tags}
+    if storage_id is not None:
+        raw['storage_id'] = storage_id
+    if target_resource_id is not None:
+        raw['target_resource_id'] = target_resource_id
+    fl.as_dict.return_value = raw
     return fl
 
 
@@ -99,3 +104,62 @@ class TestGather:
         with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def _gather(self, watcher, fl, w=None):
+        w = w or MagicMock()
+        network = MagicMock()
+        network.network_watchers.list_all.return_value = [watcher]
+        network.flow_logs.list.return_value = [fl]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        return w
+
+    def test_a_flow_logs_storage_account_gets_an_exports_to_edge(self):
+        fl = _flow_log(storage_id='/subscriptions/s1/.../storageAccounts/sa1')
+        w = self._gather(_watcher(), fl)
+        assert {'from_type': 'flow_log', 'from_id': fl.id, 'to_type': 'storage_account',
+                'to_id': '/subscriptions/s1/.../storageAccounts/sa1', 'relationship': 'exports_to'} in [c.kwargs for c in w.add_edge.call_args_list]
+
+    def test_an_nsg_target_gets_a_monitors_edge_typed_as_nsg(self):
+        fl = _flow_log(target_resource_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg1')
+        w = self._gather(_watcher(), fl)
+        w.add_edge.assert_called_once_with(
+            from_type='flow_log', from_id=fl.id, to_type='nsg',
+            to_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg1',
+            relationship='monitors',
+        )
+
+    def test_a_subnet_target_gets_a_monitors_edge_typed_as_subnet_not_vnet(self):
+        # Confirms the subnet pattern takes precedence over the vnet
+        # pattern (both match a subnet's own longer ARM path).
+        fl = _flow_log(target_resource_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/subnet1')
+        w = self._gather(_watcher(), fl)
+        w.add_edge.assert_called_once_with(
+            from_type='flow_log', from_id=fl.id, to_type='subnet',
+            to_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/subnet1',
+            relationship='monitors',
+        )
+
+    def test_a_vnet_target_gets_a_monitors_edge_typed_as_virtual_network(self):
+        fl = _flow_log(target_resource_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1')
+        w = self._gather(_watcher(), fl)
+        w.add_edge.assert_called_once_with(
+            from_type='flow_log', from_id=fl.id, to_type='virtual_network',
+            to_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1',
+            relationship='monitors',
+        )
+
+    def test_no_storage_id_or_target_gets_no_edges(self):
+        fl = _flow_log()
+        w = self._gather(_watcher(), fl)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_flow_log_gets_no_edges(self):
+        fl = _flow_log(storage_id='/subscriptions/s1/.../storageAccounts/sa1',
+                        target_resource_id='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg1')
+        w = MagicMock()
+        w.add_resource.return_value = False
+        self._gather(_watcher(), fl, w=w)
+        w.add_edge.assert_not_called()

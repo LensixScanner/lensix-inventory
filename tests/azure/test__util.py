@@ -21,6 +21,38 @@ class TestResourceGroup:
         assert m.resource_group('/subscriptions/sub-1/providers/Microsoft.Compute') is None
 
 
+class TestNormalizeId:
+    def test_lowercases_an_id(self):
+        rid = '/subscriptions/SUB-1/resourceGroups/My-RG/providers/Microsoft.Network/virtualNetworks/VNET1'
+        assert m.normalize_id(rid) == rid.lower()
+
+    def test_none_becomes_empty_string(self):
+        assert m.normalize_id(None) == ''
+
+    def test_empty_string_stays_empty(self):
+        assert m.normalize_id('') == ''
+
+
+class TestIsResourceGroupScope:
+    def test_true_for_a_resource_group_scope(self):
+        assert m.is_resource_group_scope('/subscriptions/sub-1/resourceGroups/my-rg') is True
+
+    def test_false_for_a_subscription_scope(self):
+        assert m.is_resource_group_scope('/subscriptions/sub-1') is False
+
+    def test_false_for_a_resource_level_scope(self):
+        assert m.is_resource_group_scope('/subscriptions/sub-1/resourceGroups/my-rg/providers/Microsoft.Storage/storageAccounts/sa1') is False
+
+    def test_false_for_none(self):
+        assert m.is_resource_group_scope(None) is False
+
+    def test_false_for_empty_string(self):
+        assert m.is_resource_group_scope('') is False
+
+    def test_case_insensitive_match(self):
+        assert m.is_resource_group_scope('/SUBSCRIPTIONS/sub-1/RESOURCEGROUPS/my-rg') is True
+
+
 class TestAsDict:
     def test_returns_none_unchanged(self):
         assert m.as_dict(None) is None

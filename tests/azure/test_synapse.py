@@ -5,12 +5,16 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.azure.synapse as m
 
 
-def _workspace(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Synapse/workspaces/w1', name='w1'):
+def _workspace(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Synapse/workspaces/w1', name='w1',
+               subnet_id=None):
     ws = MagicMock()
     ws.location = location
     ws.id = rid
     ws.name = name
-    ws.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if subnet_id is not None:
+        raw['virtual_network_profile'] = {'compute_subnet_id': subnet_id}
+    ws.as_dict.return_value = raw
     return ws
 
 
@@ -65,3 +69,36 @@ class TestGather:
         with patch('azure.mgmt.synapse.SynapseManagementClient', return_value=client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_workspace_with_a_managed_vnet_compute_subnet_gets_an_in_subnet_edge(self):
+        w = MagicMock()
+        ws = _workspace(subnet_id='/subscriptions/s1/.../subnets/synapse-subnet')
+        client = MagicMock()
+        client.workspaces.list.return_value = [ws]
+        with patch('azure.mgmt.synapse.SynapseManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='synapse_workspace', from_id=ws.id, to_type='subnet',
+            to_id='/subscriptions/s1/.../subnets/synapse-subnet', relationship='in_subnet',
+        )
+
+    def test_a_workspace_with_no_compute_subnet_gets_no_edge(self):
+        w = MagicMock()
+        ws = _workspace()
+        client = MagicMock()
+        client.workspaces.list.return_value = [ws]
+        with patch('azure.mgmt.synapse.SynapseManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_workspace_gets_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        ws = _workspace(subnet_id='/subscriptions/s1/.../subnets/synapse-subnet')
+        client = MagicMock()
+        client.workspaces.list.return_value = [ws]
+        with patch('azure.mgmt.synapse.SynapseManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()

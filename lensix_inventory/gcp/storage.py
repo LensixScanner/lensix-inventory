@@ -47,7 +47,7 @@ def gather(project_id, credentials, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'storage_bucket:{name}', message=e)
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='storage_bucket',
             region=region,
             resource_id=name,
@@ -55,3 +55,12 @@ def gather(project_id, credentials, writer):
             raw=raw,
             tags=raw.get('labels'),
         )
+        if recorded:
+            # encryption.defaultKmsKeyName is always the fully-qualified
+            # KMS resource name (confirmed against the real discovery
+            # document schema, same convention as every other GCP CMEK
+            # field) — matches kms_crypto_key's own resource_id exactly,
+            # no name-based resolution needed.
+            kms_key = (bucket.get('encryption') or {}).get('defaultKmsKeyName')
+            if kms_key:
+                writer.add_edge(from_type='storage_bucket', from_id=name, to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek')

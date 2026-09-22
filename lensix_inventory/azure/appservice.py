@@ -12,6 +12,15 @@ stripped before upload (see common/secrets.py), same treatment as
 aws/lambda_.py's `_redact_environment` — only the scan result and the
 setting NAMES (never values) are kept, since app settings are a common
 place for hardcoded credentials to end up.
+
+Edges: app_service -> subnet (in_subnet), when the app has regional VNet
+integration configured (`virtual_network_subnet_id`). Emitted as read —
+the subnet endpoint is owned by network.py's own gather(), a separate
+module/container (see network.py's own docstring for this pattern). No
+app_service -> app_service_plan edge: nothing in this codebase gathers
+`server_farm_id`'s own target as a resource yet, so that edge would be
+permanently unresolvable — add it if/when an app_service_plan module
+exists.
 """
 
 from azure.core.exceptions import HttpResponseError
@@ -97,7 +106,7 @@ def gather(credential, subscription_id, writer):
         if rg and app.kind and 'functionapp' in app.kind.lower():
             raw['_Functions'] = get_functions(credential, subscription_id, rg, name)
 
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='app_service',
             region=app.location or 'global',
             resource_id=app.id,
@@ -107,3 +116,7 @@ def gather(credential, subscription_id, writer):
             secret_scan_hits=secret_hits,
             tags=raw.get('tags'),
         )
+        if added:
+            subnet_id = raw.get('virtual_network_subnet_id')
+            if subnet_id:
+                writer.add_edge(from_type='app_service', from_id=app.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
