@@ -24,16 +24,22 @@ def _vnet(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/provide
     return vnet
 
 
-def _subnet(sid='/subscriptions/s1/.../virtualNetworks/vnet1/subnets/subnet1', name='subnet1', address_prefix='10.0.1.0/24'):
-    return {'id': sid, 'name': name, 'address_prefix': address_prefix}
+def _subnet(sid='/subscriptions/s1/.../virtualNetworks/vnet1/subnets/subnet1', name='subnet1', address_prefix='10.0.1.0/24', nsg_id=None):
+    subnet = {'id': sid, 'name': name, 'address_prefix': address_prefix}
+    if nsg_id is not None:
+        subnet['network_security_group'] = {'id': nsg_id}
+    return subnet
 
 
 def _peering(rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/virtualNetworks/vnet1/virtualNetworkPeerings/peer1',
-             name='peer1'):
+             name='peer1', remote_vnet_id=None):
     peering = MagicMock()
     peering.id = rid
     peering.name = name
-    peering.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if remote_vnet_id is not None:
+        raw['remote_virtual_network'] = {'id': remote_vnet_id}
+    peering.as_dict.return_value = raw
     return peering
 
 
@@ -190,3 +196,142 @@ class TestGather:
             m.gather('cred', 'sub-1', w)
         resource_types = [c.kwargs['resource_type'] for c in w.add_resource.call_args_list]
         assert resource_types == ['virtual_network']
+
+
+class TestGatherEdges:
+    def test_subnet_gets_an_in_vnet_edge_to_its_parent_vnet(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1', subnets=[_subnet(sid='sub-a')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='subnet', from_id='sub-a', to_type='virtual_network', to_id='vnet-1', relationship='in_vnet',
+        )
+
+    def test_subnet_with_an_nsg_also_gets_an_associated_with_nsg_edge(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1', subnets=[_subnet(sid='sub-a', nsg_id='nsg-1')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = w.add_edge.call_args_list
+        assert len(edge_calls) == 2
+        assert edge_calls[1].kwargs == {
+            'from_type': 'subnet', 'from_id': 'sub-a', 'to_type': 'nsg', 'to_id': 'nsg-1', 'relationship': 'associated_with_nsg',
+        }
+
+    def test_a_subnet_with_no_nsg_gets_no_associated_with_nsg_edge(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1', subnets=[_subnet(sid='sub-a')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_edge.call_count == 1
+
+    def test_a_fully_suppressed_subnet_gets_no_edge(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        vnet = _vnet(rid='vnet-1', subnets=[_subnet(sid='sub-a')])
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = []
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_peering_gets_a_peers_with_edge_to_its_own_local_vnet(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1')
+        peering = _peering()
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = [peering]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='vnet_peering', from_id=peering.id, to_type='virtual_network', to_id='vnet-1', relationship='peers_with',
+        )
+
+    def test_peering_also_gets_a_peers_with_edge_to_its_remote_vnet(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1')
+        peering = _peering(remote_vnet_id='vnet-2')
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = [peering]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = w.add_edge.call_args_list
+        assert len(edge_calls) == 2
+        assert edge_calls[1].kwargs == {
+            'from_type': 'vnet_peering', 'from_id': peering.id, 'to_type': 'virtual_network', 'to_id': 'vnet-2', 'relationship': 'peers_with',
+        }
+
+    def test_remote_vnet_id_is_case_resolved_against_this_subscriptions_own_vnets(self):
+        # The remote_virtual_network.id echoed back by the peering API can
+        # be cased differently than the same VNet's own vnet.id from
+        # virtual_networks.list_all() — the edge should use the target's
+        # own actual casing (VNET-2), not the peering's own casing
+        # (vnet-2), so it actually joins to the persisted virtual_network
+        # resource. See _util.normalize_id's own docstring.
+        w = MagicMock()
+        local = _vnet(rid='vnet-1', name='vnet1')
+        remote = _vnet(rid='VNET-2', name='vnet2')
+        peering = _peering(remote_vnet_id='vnet-2')
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [local, remote]
+
+        def _list(rg, name):
+            return [peering] if name == 'vnet1' else []
+        network.virtual_network_peerings.list.side_effect = _list
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        remote_edge = [c for c in w.add_edge.call_args_list if c.kwargs['to_id'] != 'vnet-1' and c.kwargs['from_type'] == 'vnet_peering'][0]
+        assert remote_edge.kwargs['to_id'] == 'VNET-2'
+
+    def test_an_unresolvable_remote_vnet_id_falls_back_to_the_raw_id(self):
+        # A peering to a VNet in a different subscription (peerings can
+        # cross subscriptions) won't be in this gather() run's own vnets
+        # list — the edge is still emitted with the raw id rather than
+        # dropped, since persist_resource_edges() tolerates an unresolved
+        # endpoint (see its own docstring).
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1')
+        peering = _peering(remote_vnet_id='/subscriptions/other-sub/.../virtualNetworks/foreign-vnet')
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = [peering]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = w.add_edge.call_args_list
+        assert edge_calls[1].kwargs['to_id'] == '/subscriptions/other-sub/.../virtualNetworks/foreign-vnet'
+
+    def test_a_peering_with_no_remote_virtual_network_field_gets_only_the_local_edge(self):
+        w = MagicMock()
+        vnet = _vnet(rid='vnet-1')
+        peering = _peering()
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = [peering]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_edge.call_count == 1
+
+    def test_a_fully_suppressed_peering_gets_no_edges(self):
+        w = MagicMock()
+        w.add_resource.side_effect = lambda **kw: kw['resource_type'] != 'vnet_peering'
+        vnet = _vnet(rid='vnet-1')
+        peering = _peering(remote_vnet_id='vnet-2')
+        network = MagicMock()
+        network.virtual_networks.list_all.return_value = [vnet]
+        network.virtual_network_peerings.list.return_value = [peering]
+        with patch('azure.mgmt.network.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()

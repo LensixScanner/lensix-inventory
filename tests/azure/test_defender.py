@@ -32,12 +32,17 @@ def _public_ip(rid='/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Netw
 
 
 def _nic(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/networkInterfaces/nic1',
-         name='nic1', tags=None):
+         name='nic1', tags=None, subnet_ids=None, nsg_id=None):
     nic = MagicMock()
     nic.location = location
     nic.id = rid
     nic.name = name
-    nic.as_dict = MagicMock(return_value={'id': rid, 'name': name, 'tags': tags})
+    raw = {'id': rid, 'name': name, 'tags': tags}
+    if subnet_ids is not None:
+        raw['ip_configurations'] = [{'subnet': {'id': sid}} for sid in subnet_ids]
+    if nsg_id is not None:
+        raw['network_security_group'] = {'id': nsg_id}
+    nic.as_dict = MagicMock(return_value=raw)
     return nic
 
 
@@ -105,6 +110,62 @@ class TestGather:
              patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherNicEdges:
+    def test_a_nic_gets_an_in_subnet_edge_per_ip_configuration(self):
+        w = MagicMock()
+        sc = MagicMock()
+        sc.pricings.list.return_value = []
+        network = MagicMock()
+        network.network_interfaces.list_all.return_value = [_nic(subnet_ids=['subnet-1', 'subnet-2'])]
+        with patch('lensix_inventory.azure.defender.SecurityCenter', return_value=sc), \
+             patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = w.add_edge.call_args_list
+        assert len(edge_calls) == 2
+        assert edge_calls[0].kwargs == {
+            'from_type': 'network_interface', 'from_id': '/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/networkInterfaces/nic1',
+            'to_type': 'subnet', 'to_id': 'subnet-1', 'relationship': 'in_subnet',
+        }
+        assert edge_calls[1].kwargs['to_id'] == 'subnet-2'
+
+    def test_a_nic_with_its_own_nsg_gets_an_associated_with_nsg_edge(self):
+        w = MagicMock()
+        sc = MagicMock()
+        sc.pricings.list.return_value = []
+        network = MagicMock()
+        network.network_interfaces.list_all.return_value = [_nic(nsg_id='nsg-1')]
+        with patch('lensix_inventory.azure.defender.SecurityCenter', return_value=sc), \
+             patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='network_interface', from_id='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Network/networkInterfaces/nic1',
+            to_type='nsg', to_id='nsg-1', relationship='associated_with_nsg',
+        )
+
+    def test_a_nic_with_neither_gets_no_edges(self):
+        w = MagicMock()
+        sc = MagicMock()
+        sc.pricings.list.return_value = []
+        network = MagicMock()
+        network.network_interfaces.list_all.return_value = [_nic()]
+        with patch('lensix_inventory.azure.defender.SecurityCenter', return_value=sc), \
+             patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_nic_gets_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        sc = MagicMock()
+        sc.pricings.list.return_value = []
+        network = MagicMock()
+        network.network_interfaces.list_all.return_value = [_nic(subnet_ids=['subnet-1'], nsg_id='nsg-1')]
+        with patch('lensix_inventory.azure.defender.SecurityCenter', return_value=sc), \
+             patch('lensix_inventory.azure.defender.NetworkManagementClient', return_value=network):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
 
 
 class TestGetPublicIpAddresses:

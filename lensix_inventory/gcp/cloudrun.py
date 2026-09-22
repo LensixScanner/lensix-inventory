@@ -39,6 +39,21 @@ def get_iam_policy(run, service_name):
     return resp.get('bindings', [])
 
 
+def _vpc_connector_id(project_id, region, connector_ref):
+    """The `run.googleapis.com/vpc-access-connector` annotation is a
+    free-text Knative annotation, not a typed/validated API field like
+    Cloud Functions v2's own serviceConfig.vpcConnector — Cloud Run has
+    always accepted EITHER a bare connector name (same project/region,
+    the common case) or the fully-qualified
+    'projects/*/locations/*/connectors/*' path (for a connector in a
+    different project). Returns None for an empty/missing annotation."""
+    if not connector_ref:
+        return None
+    if connector_ref.startswith('projects/'):
+        return connector_ref
+    return f'projects/{project_id}/locations/{region}/connectors/{connector_ref}'
+
+
 def gather(project_id, credentials, writer):
     run = discovery.build('run', 'v1', credentials=credentials)
 
@@ -60,7 +75,7 @@ def gather(project_id, credentials, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'cloudrun_service:{name}', message=e)
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='cloudrun_service',
             region=region,
             resource_id=service_name,
@@ -68,3 +83,9 @@ def gather(project_id, credentials, writer):
             raw=raw,
             tags=metadata.get('labels'),
         )
+        if recorded:
+            connector_ref = (raw.get('spec', {}).get('template', {}).get('metadata', {})
+                             .get('annotations', {}) or {}).get('run.googleapis.com/vpc-access-connector')
+            connector_id = _vpc_connector_id(project_id, region, connector_ref)
+            if connector_id:
+                writer.add_edge(from_type='cloudrun_service', from_id=service_name, to_type='vpc_connector', to_id=connector_id, relationship='uses_vpc_connector')

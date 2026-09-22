@@ -5,10 +5,12 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.secretmanager as m
 
 
-def _secret(*, name='projects/p/secrets/prod-db-password', labels=None):
+def _secret(*, name='projects/p/secrets/prod-db-password', labels=None, replication=None):
     s = {'name': name}
     if labels is not None:
         s['labels'] = labels
+    if replication is not None:
+        s['replication'] = replication
     return s
 
 
@@ -128,3 +130,58 @@ class TestGather:
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
         writer.add_error.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_an_automatic_replication_cmek_secret_produces_a_uses_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        secret = _secret(replication={'automatic': {'customerManagedEncryption': {'kmsKeyName': kms_key}}})
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='secretmanager_secret', from_id=secret['name'],
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_user_managed_replication_produces_one_edge_per_replica(self):
+        key1 = 'projects/p/locations/us-east1/keyRings/r/cryptoKeys/k1'
+        key2 = 'projects/p/locations/us-west1/keyRings/r/cryptoKeys/k2'
+        secret = _secret(replication={'userManaged': {'replicas': [
+            {'location': 'us-east1', 'customerManagedEncryption': {'kmsKeyName': key1}},
+            {'location': 'us-west1', 'customerManagedEncryption': {'kmsKeyName': key2}},
+        ]}})
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        edges = [c.kwargs for c in writer.add_edge.call_args_list]
+        assert {'from_type': 'secretmanager_secret', 'from_id': secret['name'], 'to_type': 'kms_crypto_key', 'to_id': key1, 'relationship': 'uses_cmek'} in edges
+        assert {'from_type': 'secretmanager_secret', 'from_id': secret['name'], 'to_type': 'kms_crypto_key', 'to_id': key2, 'relationship': 'uses_cmek'} in edges
+
+    def test_a_google_managed_secret_produces_no_edge(self):
+        secret = _secret(replication={'automatic': {}})
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_no_replication_field_at_all_produces_no_edge(self):
+        secret = _secret()
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_secret_produces_no_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        secret = _secret(replication={'automatic': {'customerManagedEncryption': {'kmsKeyName': kms_key}}}, labels={'lensix-suppress': 'true'})
+        sm = _sm_client([secret])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=sm):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

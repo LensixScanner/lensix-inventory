@@ -77,7 +77,8 @@ class TestRedactMetadata:
 
 
 class TestGatherMetadataIntegration:
-    def _compute(self, instances=None, project_metadata_items=None, images=None, snapshots=None, migs=None):
+    def _compute(self, instances=None, project_metadata_items=None, images=None, snapshots=None, migs=None,
+                 networks=None, subnets_by_region=None):
         compute = MagicMock()
         compute.instances.return_value.aggregatedList.return_value = _paged(
             aggregated={'zones/z1': {'instances': instances or []}})
@@ -91,6 +92,16 @@ class TestGatherMetadataIntegration:
         compute.instanceGroupManagers.return_value.aggregatedList_next.return_value = None
         compute.autoscalers.return_value.aggregatedList.return_value = _paged(aggregated={})
         compute.autoscalers.return_value.aggregatedList_next.return_value = None
+        # gather() also resolves each instance's network/subnetwork
+        # references via vpc.py's own exported maps (see gather()'s own
+        # comment) — empty by default so tests not exercising those edges
+        # don't need to know about this at all.
+        compute.networks.return_value.list.return_value = _paged(items=networks or [])
+        compute.networks.return_value.list_next.return_value = None
+        subnets_by_region = subnets_by_region or {}
+        compute.subnetworks.return_value.aggregatedList.return_value = _paged(
+            aggregated={f'regions/{r}': {'subnetworks': subs} for r, subs in subnets_by_region.items()})
+        compute.subnetworks.return_value.aggregatedList_next.return_value = None
         compute.projects.return_value.get.return_value.execute.return_value = {
             'commonInstanceMetadata': {'items': project_metadata_items or []},
         }
@@ -182,6 +193,124 @@ class TestGatherTags:
             m.gather('proj-1', MagicMock(), w)
         calls = {c.kwargs['resource_type']: c for c in w.add_resource.call_args_list}
         assert 'tags' not in calls['compute_project_metadata'].kwargs
+
+
+class TestGatherNetworkEdges:
+    def _compute(self, **kwargs):
+        return TestGatherMetadataIntegration()._compute(**kwargs)
+
+    def test_an_instance_produces_vpc_network_and_subnet_edges(self):
+        w = MagicMock()
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1',
+            'networkInterfaces': [{
+                'network': 'https://compute.../networks/default',
+                'subnetwork': 'https://compute.../regions/us-central1/subnetworks/sub1',
+            }],
+        }
+        network = {'name': 'default', 'selfLink': 'https://compute.../networks/default'}
+        subnet = {'name': 'sub1', 'selfLink': 'https://compute.../regions/us-central1/subnetworks/sub1'}
+        compute = self._compute(instances=[instance], networks=[network], subnets_by_region={'us-central1': [subnet]})
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {
+            'from_type': 'compute_instance', 'from_id': instance['selfLink'],
+            'to_type': 'vpc_network', 'to_id': network['selfLink'], 'relationship': 'in_vpc_network',
+        } in edges
+        assert {
+            'from_type': 'compute_instance', 'from_id': instance['selfLink'],
+            'to_type': 'subnet', 'to_id': subnet['selfLink'], 'relationship': 'in_subnet',
+        } in edges
+
+    def test_a_multi_homed_instance_produces_one_edge_per_network_interface(self):
+        w = MagicMock()
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1',
+            'networkInterfaces': [
+                {'network': 'https://compute.../networks/net1'},
+                {'network': 'https://compute.../networks/net2'},
+            ],
+        }
+        net1 = {'name': 'net1', 'selfLink': 'https://compute.../networks/net1'}
+        net2 = {'name': 'net2', 'selfLink': 'https://compute.../networks/net2'}
+        compute = self._compute(instances=[instance], networks=[net1, net2])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list if c.kwargs['to_type'] == 'vpc_network']
+        assert {e['to_id'] for e in edges} == {net1['selfLink'], net2['selfLink']}
+
+    def test_an_instance_referencing_a_subnet_by_partial_url_still_resolves_correctly(self):
+        w = MagicMock()
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1',
+            'networkInterfaces': [{'subnetwork': 'regions/us-central1/subnetworks/sub1'}],
+        }
+        subnet = {'name': 'sub1', 'selfLink': 'https://compute.../regions/us-central1/subnetworks/sub1'}
+        compute = self._compute(instances=[instance], subnets_by_region={'us-central1': [subnet]})
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        edges = [c.kwargs for c in w.add_edge.call_args_list]
+        assert {
+            'from_type': 'compute_instance', 'from_id': instance['selfLink'],
+            'to_type': 'subnet', 'to_id': subnet['selfLink'], 'relationship': 'in_subnet',
+        } in edges
+
+    def test_an_instance_with_no_network_interfaces_produces_no_edges(self):
+        w = MagicMock()
+        instance = {'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+                    'selfLink': 'https://.../instances/vm-1', 'networkInterfaces': []}
+        compute = self._compute(instances=[instance])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        w.add_edge.assert_not_called()
+
+    def test_an_unresolvable_network_reference_produces_no_edge(self):
+        w = MagicMock()
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1',
+            'networkInterfaces': [{'network': 'https://compute.../networks/unknown'}],
+        }
+        compute = self._compute(instances=[instance], networks=[{'name': 'default', 'selfLink': 'https://compute.../networks/default'}])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_instance_produces_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1', 'labels': {'lensix-suppress': 'true'},
+            'networkInterfaces': [{'network': 'https://compute.../networks/default'}],
+        }
+        network = {'name': 'default', 'selfLink': 'https://compute.../networks/default'}
+        compute = self._compute(instances=[instance], networks=[network])
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        w.add_edge.assert_not_called()
+
+    def test_a_network_resolution_failure_leaves_the_map_empty_and_produces_no_vpc_network_edges(self):
+        w = MagicMock()
+        instance = {
+            'name': 'vm-1', 'status': 'RUNNING', 'zone': 'https://.../zones/us-central1-a',
+            'selfLink': 'https://.../instances/vm-1',
+            'networkInterfaces': [{'network': 'https://compute.../networks/default'}],
+        }
+        compute = self._compute(instances=[instance])
+        compute.networks.return_value.list.side_effect = RuntimeError('boom')
+        with patch.object(m.discovery, 'build', return_value=compute):
+            m.gather('proj-1', MagicMock(), w)
+        assert any(c.kwargs['source'] == 'compute_instance (network resolution)' for c in w.add_error.call_args_list)
+        w.add_edge.assert_not_called()
+        # The instance itself must still be gathered -- a resolution
+        # failure isolates only the edges, never blocks the resource.
+        resource_types = [c.kwargs['resource_type'] for c in w.add_resource.call_args_list]
+        assert 'compute_instance' in resource_types
 
 
 class TestMigInstanceTemplateName:
@@ -469,6 +598,13 @@ class TestGatherMigPublicIpIntegration:
         compute.instanceGroupManagers.return_value.aggregatedList_next.return_value = None
         compute.autoscalers.return_value.aggregatedList.return_value = _paged(aggregated={})
         compute.autoscalers.return_value.aggregatedList_next.return_value = None
+        # gather() also resolves each instance's network/subnetwork
+        # references via vpc.py's own exported maps — empty by default,
+        # same as TestGatherMetadataIntegration's own fixture.
+        compute.networks.return_value.list.return_value = _paged(items=[])
+        compute.networks.return_value.list_next.return_value = None
+        compute.subnetworks.return_value.aggregatedList.return_value = _paged(aggregated={})
+        compute.subnetworks.return_value.aggregatedList_next.return_value = None
         compute.projects.return_value.get.return_value.execute.return_value = {'commonInstanceMetadata': {'items': []}}
         if template_side_effect is not None:
             compute.instanceTemplates.return_value.get.return_value.execute.side_effect = template_side_effect

@@ -4,6 +4,13 @@ Only the data-fetching calls are included here (resource_groups.list,
 management_locks.list_at_resource_group_level) — missing-lock evaluation
 is left server-side.
 
+Edges: management_lock -> resource_group (protects). Unlike most edges
+in this codebase, no id-parsing or resolution is needed at all — every
+lock gathered here comes from `list_at_resource_group_level(rg.name)`
+inside the SAME loop iteration as the parent `resource_group` resource,
+so `rg.id` (already in scope) is a 100%-reliable, guaranteed-matching
+target, not a guess derived from the lock's own ARM path.
+
 Requires: azure-mgmt-resource.
 """
 
@@ -30,7 +37,7 @@ def gather(credential, subscription_id, writer):
     for rg in resource_groups:
         region = rg.location or 'global'
         rg_raw = rg.as_dict()
-        writer.add_resource(
+        rg_added = writer.add_resource(
             resource_type='resource_group',
             region=region,
             resource_id=rg.id,
@@ -51,7 +58,7 @@ def gather(credential, subscription_id, writer):
             # its own SDK model (confirmed — the SDK itself warns and
             # discards it if passed), a control-plane object like
             # authorization's role_definition/policy's policy_assignment.
-            writer.add_resource(
+            lock_added = writer.add_resource(
                 resource_type='management_lock',
                 region=region,
                 resource_id=lock.id,
@@ -59,3 +66,10 @@ def gather(credential, subscription_id, writer):
                 scope_id=rg.name,
                 raw=lock.as_dict(),
             )
+            # Guarded on BOTH endpoints' own add_resource() return value —
+            # a fully-suppressed resource_group must not be referenced by
+            # a lock's edge either, same "never leak a reference to a
+            # suppressed resource" principle add_edge()'s own docstring
+            # documents for the FROM side, applied here to the TO side.
+            if lock_added and rg_added:
+                writer.add_edge(from_type='management_lock', from_id=lock.id, to_type='resource_group', to_id=rg.id, relationship='protects')

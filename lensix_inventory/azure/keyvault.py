@@ -13,6 +13,18 @@ timestamps, tags, content-type) — the cryptographic material and secret
 value require a separate get-by-version call this tool never makes, so
 there's nothing here that needs the secrets.py redaction treatment.
 
+Edges: key_vault -> subnet (in_subnet), one per
+properties.network_acls.virtual_network_rules[] entry — already embedded
+in the vault's own list() response (note the properties.* nesting — this
+SDK's Vault.as_dict() nests everything under 'properties' even at its
+pinned floor, unlike most other azure-mgmt-* packages in this codebase;
+see the pin comment in lensix-scanner-light's azure/requirements.txt).
+VirtualNetworkRule.id here IS the subnet's own ARM id directly, same
+"despite the field name" pattern as Cosmos DB's own VirtualNetworkRule.id.
+Emitted as read — the subnet endpoint is owned by network.py's own
+gather(), a separate module/container (see its own docstring for this
+pattern).
+
 Requires: azure-mgmt-keyvault, azure-mgmt-monitor, azure-keyvault-keys,
 azure-keyvault-secrets, azure-core.
 """
@@ -91,7 +103,7 @@ def gather(credential, subscription_id, writer):
         rg = _resource_group(vault.id)
         raw = vault.as_dict()
         raw['_DiagnosticSettings'] = get_diagnostic_settings(monitor_client, vault.id)
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='key_vault',
             region=region,
             resource_id=vault.id,
@@ -100,6 +112,12 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            network_acls = (raw.get('properties') or {}).get('network_acls') or {}
+            for vnet_rule in (network_acls.get('virtual_network_rules') or []):
+                subnet_id = vnet_rule.get('id')
+                if subnet_id:
+                    writer.add_edge(from_type='key_vault', from_id=vault.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
 
         try:
             for key in get_keys(vault, credential):

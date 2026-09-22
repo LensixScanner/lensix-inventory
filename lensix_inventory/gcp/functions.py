@@ -96,7 +96,7 @@ def gather(project_id, credentials, writer):
         except Exception as e:
             writer.add_error(region=region, source=f'cloud_function:{short_name}', message=e)
 
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='cloud_function',
             region=region,
             resource_id=fn_name,
@@ -105,3 +105,14 @@ def gather(project_id, credentials, writer):
             secret_scan_hits=secret_hits,
             tags=raw.get('labels'),
         )
+        if recorded:
+            # serviceConfig.vpcConnector is always the fully-qualified
+            # 'projects/*/locations/*/connectors/*' path (confirmed
+            # against the real discovery document schema, unlike Cloud
+            # Run v1's own free-text Knative annotation for the same
+            # concept — see cloudrun.py's own _vpc_connector_id()) —
+            # matches vpc_connector's own resource_id exactly, no
+            # resolution needed.
+            connector_id = svc_cfg.get('vpcConnector')
+            if connector_id:
+                writer.add_edge(from_type='cloud_function', from_id=fn_name, to_type='vpc_connector', to_id=connector_id, relationship='uses_vpc_connector')

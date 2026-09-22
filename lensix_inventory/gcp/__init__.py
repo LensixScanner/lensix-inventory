@@ -12,11 +12,23 @@ aborting the whole run.
 
 from .. import __version__
 from ..common.output import InventoryWriter
-from . import bigquery, compute, dns, functions, gke, iam, kms, lb, logging, pubsub, sql, storage, vpc
+from . import (
+    artifactregistry, bigquery, cloudrun, compute, dns, functions, gke, iam, kms, lb,
+    logging, pubsub, secretmanager, sql, storage, vpc, vpcaccess,
+)
 from .session import get_credentials, get_project_id, verify_credentials
 
+# Bug fix: artifactregistry/cloudrun/secretmanager gather() functions have
+# existed as real modules (with their own scanner-light live/upload-path
+# counterparts) but were never registered here — the self-hosted CLI's own
+# run() never gathered Artifact Registry repos, Cloud Run services, or
+# Secret Manager secrets at all, for any self-hosted customer, until now.
+# Same bug class as lensix-scanner-light's own dispatcher.py ALL_GCP_MODULES
+# list, which had the identical 3-module gap independently.
 MODULES = [
+    ('artifactregistry', artifactregistry.gather),
     ('bigquery', bigquery.gather),
+    ('cloudrun', cloudrun.gather),
     ('compute', compute.gather),
     ('dns', dns.gather),
     ('functions', functions.gather),
@@ -26,9 +38,11 @@ MODULES = [
     ('lb', lb.gather),
     ('logging', logging.gather),
     ('pubsub', pubsub.gather),
+    ('secretmanager', secretmanager.gather),
     ('sql', sql.gather),
     ('storage', storage.gather),
     ('vpc', vpc.gather),
+    ('vpcaccess', vpcaccess.gather),
 ]
 
 

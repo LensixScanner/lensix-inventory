@@ -20,6 +20,19 @@ applicable" (`None`), not an error. Blob containers get their own resource
 type (`blob_container`) since public-access findings are reported against
 individual containers by their own ARM id.
 
+Edges: storage_account -> subnet (in_subnet), one per
+network_rule_set.virtual_network_rules[] entry — already embedded in the
+account's own list() response, no extra API call needed. Despite its
+name, VirtualNetworkRule.virtual_network_resource_id is actually a
+SUBNET's own ARM id (the same real-world Azure naming quirk as Cosmos
+DB's own VirtualNetworkRule.id — both are VNet *service-endpoint* rules,
+scoped to a subnet, not the VNet itself). private_endpoint_connections[]
+has no persisted target to join to (nothing in this codebase gathers
+`private_endpoint` as its own resource type), so that's skipped, same
+reasoning as appservice.py's own app_service_plan note. Emitted as read —
+the subnet endpoint is owned by network.py's own gather(), a separate
+module/container (see its own docstring for this pattern).
+
 Requires: azure-mgmt-storage, azure-core.
 """
 
@@ -90,7 +103,7 @@ def gather(credential, subscription_id, writer):
             writer.add_error(region=region, source=f'storage:file_services:{account.name}', message=e)
             raw['_FileServiceProperties'] = None
 
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='storage_account',
             region=region,
             resource_id=account.id,
@@ -99,6 +112,11 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            for vnet_rule in ((raw.get('network_rule_set') or {}).get('virtual_network_rules') or []):
+                subnet_id = vnet_rule.get('virtual_network_resource_id')
+                if subnet_id:
+                    writer.add_edge(from_type='storage_account', from_id=account.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
 
         try:
             containers = get_blob_containers(credential, subscription_id, rg, account.name)

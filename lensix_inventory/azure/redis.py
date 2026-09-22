@@ -5,6 +5,12 @@ version and non-SSL-port-enabled evaluation is left server-side.
 `minimum_tls_version` and `enable_non_ssl_port` are both already present on
 the full `RedisResource.as_dict()` payload.
 
+Edges: redis_cache -> subnet (in_subnet), when the cache has VNet
+injection configured (`subnet_id` — Premium tier only; most caches have
+none). Emitted as read — the subnet endpoint is owned by network.py's own
+gather(), a separate module/container (see its own docstring for this
+pattern).
+
 Requires: azure-mgmt-redis.
 """
 
@@ -25,7 +31,7 @@ def gather(credential, subscription_id, writer):
 
     for cache in caches:
         raw = cache.as_dict()
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='redis_cache',
             region=cache.location or 'global',
             resource_id=cache.id,
@@ -34,3 +40,7 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            subnet_id = raw.get('subnet_id')
+            if subnet_id:
+                writer.add_edge(from_type='redis_cache', from_id=cache.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

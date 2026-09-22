@@ -11,21 +11,33 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.sql as m
 
 
-def _instance(*, name='prod-db', region='us-central1', user_labels=None, private_network=None):
+def _instance(*, name='prod-db', region='us-central1', user_labels=None, private_network=None, kms_key=None):
     settings = {'ipConfiguration': {}}
     if user_labels is not None:
         settings['userLabels'] = user_labels
     if private_network is not None:
         settings['ipConfiguration']['privateNetwork'] = private_network
-    return {'name': name, 'region': region, 'settings': settings}
+    d = {'name': name, 'region': region, 'settings': settings}
+    if kms_key is not None:
+        d['diskEncryptionConfiguration'] = {'kmsKeyName': kms_key}
+    return d
 
 
-def _sqladmin_client(instances):
+def _sqladmin_client(instances, networks=None):
     sqladmin = MagicMock()
     req = MagicMock()
     req.execute.return_value = {'items': instances}
     sqladmin.instances.return_value.list.return_value = req
     sqladmin.instances.return_value.list_next.return_value = None
+    # discovery.build() is patched to return this SAME mock for every
+    # service name, including gather()'s own separate 'compute' build for
+    # network edge resolution (see gather()'s own comment) — mocked to
+    # terminate immediately so tests not exercising those edges don't need
+    # to know about this, and so the real pagination loop doesn't spin
+    # forever against an unconfigured MagicMock's own always-truthy
+    # list_next() return.
+    sqladmin.networks.return_value.list.return_value.execute.return_value = {'items': networks or []}
+    sqladmin.networks.return_value.list_next.return_value = None
     return sqladmin
 
 
@@ -84,3 +96,84 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=sqladmin):
             m.gather('my-proj', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_private_ip_instance_produces_a_vpc_network_edge(self):
+        instance = _instance(private_network='/projects/p/global/networks/default')
+        network = {'name': 'default', 'selfLink': 'https://compute.../networks/default'}
+        sqladmin = _sqladmin_client([instance], networks=[network])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='sql_instance', from_id='prod-db',
+            to_type='vpc_network', to_id=network['selfLink'], relationship='in_vpc_network',
+        )
+
+    def test_a_public_only_instance_produces_no_edge(self):
+        instance = _instance()
+        sqladmin = _sqladmin_client([instance])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_an_unresolvable_network_produces_no_edge(self):
+        instance = _instance(private_network='/projects/p/global/networks/unknown')
+        sqladmin = _sqladmin_client([instance], networks=[{'name': 'default', 'selfLink': 'https://compute.../networks/default'}])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_instance_produces_no_edge(self):
+        instance = _instance(private_network='/projects/p/global/networks/default')
+        network = {'name': 'default', 'selfLink': 'https://compute.../networks/default'}
+        sqladmin = _sqladmin_client([instance], networks=[network])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_network_resolution_failure_produces_no_edge(self):
+        instance = _instance(private_network='/projects/p/global/networks/default')
+        sqladmin = _sqladmin_client([instance])
+        sqladmin.networks.return_value.list.side_effect = RuntimeError('boom')
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        assert any(c.kwargs['source'] == 'sql_instance (network resolution)' for c in writer.add_error.call_args_list)
+        writer.add_edge.assert_not_called()
+        writer.add_resource.assert_called_once()
+
+    def test_a_cmek_instance_produces_a_uses_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        instance = _instance(kms_key=kms_key)
+        sqladmin = _sqladmin_client([instance])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='sql_instance', from_id='prod-db',
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_google_managed_instance_produces_no_cmek_edge(self):
+        instance = _instance()
+        sqladmin = _sqladmin_client([instance])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_instance_produces_no_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        instance = _instance(kms_key=kms_key)
+        sqladmin = _sqladmin_client([instance])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=sqladmin):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

@@ -16,6 +16,16 @@ picking, so Lensix can evaluate any config-based check server-side without
 a second round trip. AAD admins are similarly merged in as
 `_Administrators`.
 
+Edges: mysql_server -> subnet (in_subnet), one per VNet service-endpoint
+rule (`virtual_network_rules.list_by_server` — a genuinely new API call,
+mirroring sql.py's own identical pattern, not derived from data already
+gathered); mysql_flexible_server -> subnet (in_subnet), when the server
+has VNet integration configured (`network.delegated_subnet_resource_id`
+— already embedded in the flexible server's own list() response, unlike
+Single Server, no extra call needed). Both emitted as read — the subnet
+endpoint is owned by network.py's own gather(), a separate module/
+container (see its own docstring for this pattern).
+
 Requires: azure-mgmt-rdbms.
 """
 
@@ -25,6 +35,12 @@ def get_servers(credential, subscription_id):
     from azure.mgmt.rdbms.mysql import MySQLManagementClient
     mysql_client = MySQLManagementClient(credential, subscription_id)
     return list(mysql_client.servers.list())
+
+
+def get_vnet_rules(credential, subscription_id, rg, server_name):
+    from azure.mgmt.rdbms.mysql import MySQLManagementClient
+    mysql_client = MySQLManagementClient(credential, subscription_id)
+    return list(mysql_client.virtual_network_rules.list_by_server(rg, server_name))
 
 
 def get_administrators(credential, subscription_id, rg, server_name):
@@ -83,7 +99,7 @@ def gather(credential, subscription_id, writer):
         raw = server.as_dict()
         raw['_Administrators'] = get_administrators(credential, subscription_id, rg, server.name)
         raw['_Configurations'] = get_configurations(credential, subscription_id, rg, server.name)
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='mysql_server',
             region=region,
             resource_id=server.id,
@@ -92,6 +108,14 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            try:
+                for vnet_rule in get_vnet_rules(credential, subscription_id, rg, server.name):
+                    subnet_id = vnet_rule.virtual_network_subnet_id
+                    if subnet_id:
+                        writer.add_edge(from_type='mysql_server', from_id=server.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            except Exception as e:
+                writer.add_error(region=region, source=f'mysql:vnet_rules:{server.name}', message=e)
 
     try:
         flex_servers = get_flexible_servers(credential, subscription_id)
@@ -104,7 +128,7 @@ def gather(credential, subscription_id, writer):
         rg = _resource_group(server.id)
         raw = server.as_dict()
         raw['_Configurations'] = get_flexible_configurations(credential, subscription_id, rg, server.name)
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='mysql_flexible_server',
             region=region,
             resource_id=server.id,
@@ -113,3 +137,7 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            subnet_id = (raw.get('network') or {}).get('delegated_subnet_resource_id')
+            if subnet_id:
+                writer.add_edge(from_type='mysql_flexible_server', from_id=server.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

@@ -68,6 +68,36 @@ def get_alert_policies(monitoring, project_id):
     return resp.get('alertPolicies', [])
 
 
+def _edge_for_sink_destination(destination):
+    """Returns (to_type, to_id) for a log sink's `destination` field, or
+    (None, None) if it doesn't identify a specific target resource this
+    tool gathers. Destination is always one of four documented forms
+    (confirmed against the real discovery document schema):
+      storage.googleapis.com/[GCS_BUCKET]
+      bigquery.googleapis.com/projects/[PROJECT_ID]/datasets/[DATASET]
+      pubsub.googleapis.com/projects/[PROJECT_ID]/topics/[TOPIC_ID]
+      logging.googleapis.com/projects/[PROJECT_ID]
+      logging.googleapis.com/projects/[PROJECT_ID]/locations/[LOCATION_ID]/buckets/[BUCKET_ID]
+    Each service prefix's own suffix format matches that target resource
+    type's own resource_id shape differently: storage_bucket's resource_id
+    is the bare bucket name (used as-is); bigquery_dataset's is the bare
+    dataset id (last path segment only, unlike the other two); pubsub_topic's
+    and log_bucket's are each the full 'projects/.../topics|buckets/...'
+    path (used as-is). The bare 'logging.googleapis.com/projects/[ID]' form
+    (no specific bucket) names no resource this tool gathers, so it's
+    skipped, not treated as a dangling log_bucket reference."""
+    if destination.startswith('storage.googleapis.com/'):
+        return 'storage_bucket', destination[len('storage.googleapis.com/'):]
+    if destination.startswith('bigquery.googleapis.com/'):
+        suffix = destination[len('bigquery.googleapis.com/'):]
+        return 'bigquery_dataset', suffix.rsplit('/', 1)[-1]
+    if destination.startswith('pubsub.googleapis.com/'):
+        return 'pubsub_topic', destination[len('pubsub.googleapis.com/'):]
+    if destination.startswith('logging.googleapis.com/') and '/buckets/' in destination:
+        return 'log_bucket', destination[len('logging.googleapis.com/'):]
+    return None, None
+
+
 def get_destination_bucket_exists(storage_api, destination):
     """True/False if `destination` is a storage.googleapis.com/<bucket>
     sink target and the existence check was conclusive (404 -> False,
@@ -124,13 +154,17 @@ def gather(project_id, credentials, writer):
             except Exception as e:
                 raw['_DestinationBucketExists'] = None
                 writer.add_error(region='global', source=f'log_sink (destination bucket:{name})', message=e)
-            writer.add_resource(
+            recorded = writer.add_resource(
                 resource_type='log_sink',
                 region='global',
                 resource_id=name,
                 resource_name=name.split('/')[-1],
                 raw=raw,
             )
+            if recorded:
+                to_type, to_id = _edge_for_sink_destination(sink.get('destination', ''))
+                if to_type:
+                    writer.add_edge(from_type='log_sink', from_id=name, to_type=to_type, to_id=to_id, relationship='exports_to')
     except Exception as e:
         writer.add_error(region='global', source='log_sink', message=e)
 

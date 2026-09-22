@@ -12,7 +12,7 @@ import lensix_inventory.gcp.functions as m
 
 
 def _function(*, name='projects/p/locations/us-central1/functions/fn1', labels=None,
-              svc_env=None, build_env=None):
+              svc_env=None, build_env=None, vpc_connector=None):
     d = {'name': name, 'serviceConfig': {}, 'buildConfig': {}}
     if labels is not None:
         d['labels'] = labels
@@ -20,6 +20,8 @@ def _function(*, name='projects/p/locations/us-central1/functions/fn1', labels=N
         d['serviceConfig']['environmentVariables'] = svc_env
     if build_env is not None:
         d['buildConfig']['environmentVariables'] = build_env
+    if vpc_connector is not None:
+        d['serviceConfig']['vpcConnector'] = vpc_connector
     return d
 
 
@@ -87,3 +89,35 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=cf):
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_vpc_connector_produces_a_uses_vpc_connector_edge(self):
+        connector = 'projects/p/locations/us-central1/connectors/my-connector'
+        fn = _function(vpc_connector=connector)
+        cf = _cf_client([fn])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=cf):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='cloud_function', from_id=fn['name'],
+            to_type='vpc_connector', to_id=connector, relationship='uses_vpc_connector',
+        )
+
+    def test_no_vpc_connector_produces_no_edge(self):
+        fn = _function()
+        cf = _cf_client([fn])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=cf):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_function_produces_no_edge(self):
+        connector = 'projects/p/locations/us-central1/connectors/my-connector'
+        fn = _function(vpc_connector=connector, labels={'lensix-suppress': 'true'})
+        cf = _cf_client([fn])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=cf):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

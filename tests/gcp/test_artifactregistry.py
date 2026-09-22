@@ -5,10 +5,12 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.artifactregistry as m
 
 
-def _repo(*, name='projects/p/locations/us/repositories/prod-images', labels=None):
+def _repo(*, name='projects/p/locations/us/repositories/prod-images', labels=None, kms_key=None):
     r = {'name': name, 'format': 'DOCKER'}
     if labels is not None:
         r['labels'] = labels
+    if kms_key is not None:
+        r['kmsKeyName'] = kms_key
     return r
 
 
@@ -140,3 +142,34 @@ class TestGather:
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
         writer.add_error.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_cmek_repo_produces_a_uses_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        repo = _repo(kms_key=kms_key)
+        ar = _ar_client([repo])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=ar):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='artifactregistry_repository', from_id=repo['name'],
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_google_managed_repo_produces_no_edge(self):
+        ar = _ar_client([_repo()])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=ar):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_repo_produces_no_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        repo = _repo(kms_key=kms_key, labels={'lensix-suppress': 'true'})
+        ar = _ar_client([repo])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=ar):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

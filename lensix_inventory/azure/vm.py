@@ -83,6 +83,15 @@ isolated in its own try/except, same "indeterminate, don't guess"
 discipline as `_ProtectedByAzureBackup` and AWS's own `_HasScheduledAction`
 (`lensix_inventory/aws/autoscaling.py`).
 
+Edges: vm -> network_interface (attached_to_nic), one per
+network_profile.network_interfaces[] entry — the network_interface
+endpoint itself is owned by defender.py's own gather() (see this same
+docstring's NIC-ownership note above), not this module.
+recovery_services_vault -> vm (protects) is also emitted here (not by
+rsv.py's own gather()) — see rsv.get_protected_vm_resource_ids()'s own
+docstring for why: this module's own per-vault Backup lookup is the only
+place that knows WHICH vault protects a given VM.
+
 Requires: azure-mgmt-compute, azure-mgmt-recoveryservices,
 azure-mgmt-recoveryservicesbackup, azure-mgmt-maintenance,
 azure-mgmt-monitor.
@@ -207,7 +216,7 @@ def gather(credential, subscription_id, writer):
     # throughout this codebase for a failed governance-object lookup.
     try:
         vaults = _rsv.get_vaults(credential, subscription_id)
-        protected_vm_ids = _rsv.get_protected_vm_resource_ids(credential, subscription_id, vaults)
+        protected_vm_ids = _rsv.get_protected_vm_resource_ids(credential, subscription_id, vaults, writer=writer)
     except Exception as e:
         writer.add_error(region='global', source='vm:backup_protected_items', message=e)
         protected_vm_ids = None
@@ -245,7 +254,7 @@ def gather(credential, subscription_id, writer):
                 writer.add_error(region=region, source='vm:maintenance_configuration_assignment',
                                   message=f"{vm.name}: {e}")
 
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='vm',
             region=region,
             resource_id=vm.id,
@@ -259,7 +268,18 @@ def gather(credential, subscription_id, writer):
         # module docstring: defender.py already gathers every NIC in the
         # subscription via one network_interfaces.list_all() call, which
         # `vm_nonsg` and friends can join against server-side via each VM's
-        # own network_profile.network_interfaces[].id.
+        # own network_profile.network_interfaces[].id. The edge below is
+        # the same join, made explicit — defender.py's own NIC resource_id
+        # is that NIC's own `.id`, the identical string this VM's own
+        # network_profile echoes back (both come from the same ARM
+        # resource, referenced rather than duplicated across API calls),
+        # so no case-resolution is needed here the way network.py's
+        # cross-subscription peering target needs it.
+        if added:
+            for nic_ref in ((raw.get('network_profile') or {}).get('network_interfaces') or []):
+                nic_id = nic_ref.get('id')
+                if nic_id:
+                    writer.add_edge(from_type='vm', from_id=vm.id, to_type='network_interface', to_id=nic_id, relationship='attached_to_nic')
 
     try:
         for disk in get_disks(credential, subscription_id):

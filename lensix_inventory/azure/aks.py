@@ -10,6 +10,14 @@ Diagnostic settings need a per-cluster sub-call —
 `diagnostic_settings.list(cluster.id)` — which is itself a plain list call,
 so it's included too and merged into each cluster's raw record as
 `_DiagnosticSettings`.
+
+Edges: kubernetes_cluster -> subnet (in_subnet), one per distinct
+agent_pool_profiles[].vnet_subnet_id (a cluster with multiple node pools
+can reference more than one subnet; a kubenet cluster with no CNI subnet
+assignment has none at all — its pools' vnet_subnet_id is None). Emitted
+as read — the subnet endpoint is owned by network.py's own gather(), a
+separate module/container, so there's no same-run subnet list to
+case-resolve against (see network.py's own docstring for this pattern).
 """
 
 from azure.mgmt.containerservice import ContainerServiceClient
@@ -35,7 +43,7 @@ def gather(credential, subscription_id, writer):
         raw = _as_dict(cluster)
         raw['_DiagnosticSettings'] = get_diagnostic_settings(credential, subscription_id, cluster.id)
 
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='kubernetes_cluster',
             region=cluster.location or 'global',
             resource_id=cluster.id,
@@ -44,3 +52,11 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=raw.get('tags'),
         )
+        if added:
+            subnet_ids = {
+                pool.get('vnet_subnet_id')
+                for pool in (raw.get('agent_pool_profiles') or [])
+                if pool.get('vnet_subnet_id')
+            }
+            for subnet_id in subnet_ids:
+                writer.add_edge(from_type='kubernetes_cluster', from_id=cluster.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')

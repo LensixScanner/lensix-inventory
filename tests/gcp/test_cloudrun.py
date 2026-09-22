@@ -151,3 +151,63 @@ class TestGather:
             m.gather('my-proj', MagicMock(), writer)
         writer.add_resource.assert_not_called()
         writer.add_error.assert_not_called()
+
+
+class TestVpcConnectorId:
+    def test_bare_name_is_expanded_to_the_full_path_in_the_services_own_project_and_region(self):
+        assert m._vpc_connector_id('p', 'us-central1', 'my-connector') == 'projects/p/locations/us-central1/connectors/my-connector'
+
+    def test_a_fully_qualified_path_is_used_as_is(self):
+        full = 'projects/other-proj/locations/us-east1/connectors/shared-connector'
+        assert m._vpc_connector_id('p', 'us-central1', full) == full
+
+    def test_none_for_no_annotation(self):
+        assert m._vpc_connector_id('p', 'us-central1', None) is None
+
+    def test_none_for_an_empty_annotation(self):
+        assert m._vpc_connector_id('p', 'us-central1', '') is None
+
+
+class TestGatherEdges:
+    def test_a_bare_connector_annotation_produces_an_edge_scoped_to_the_services_own_project_and_region(self):
+        svc = _service(name='checkout-api', region='us-east1', template_annotations={'run.googleapis.com/vpc-access-connector': 'my-connector'})
+        run = _run_client([svc])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=run):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='cloudrun_service', from_id='projects/my-proj/locations/us-east1/services/checkout-api',
+            to_type='vpc_connector', to_id='projects/my-proj/locations/us-east1/connectors/my-connector',
+            relationship='uses_vpc_connector',
+        )
+
+    def test_a_fully_qualified_connector_annotation_is_used_as_is(self):
+        full = 'projects/shared-proj/locations/us-east1/connectors/shared-connector'
+        svc = _service(name='checkout-api', region='us-east1', template_annotations={'run.googleapis.com/vpc-access-connector': full})
+        run = _run_client([svc])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=run):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='cloudrun_service', from_id='projects/my-proj/locations/us-east1/services/checkout-api',
+            to_type='vpc_connector', to_id=full, relationship='uses_vpc_connector',
+        )
+
+    def test_no_connector_annotation_produces_no_edge(self):
+        svc = _service(name='checkout-api', region='us-east1')
+        run = _run_client([svc])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=run):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_service_produces_no_edge(self):
+        svc = _service(name='checkout-api', region='us-east1',
+                        template_annotations={'run.googleapis.com/vpc-access-connector': 'my-connector'},
+                        extra_labels={'lensix-suppress': 'true'})
+        run = _run_client([svc])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=run):
+            m.gather('my-proj', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

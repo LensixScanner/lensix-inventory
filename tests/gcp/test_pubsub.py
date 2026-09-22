@@ -9,17 +9,21 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.gcp.pubsub as m
 
 
-def _topic(*, name='projects/p/topics/t1', labels=None):
+def _topic(*, name='projects/p/topics/t1', labels=None, kms_key=None):
     d = {'name': name}
     if labels is not None:
         d['labels'] = labels
+    if kms_key is not None:
+        d['kmsKeyName'] = kms_key
     return d
 
 
-def _sub(*, name='projects/p/subscriptions/s1', labels=None):
+def _sub(*, name='projects/p/subscriptions/s1', labels=None, topic=None):
     d = {'name': name}
     if labels is not None:
         d['labels'] = labels
+    if topic is not None:
+        d['topic'] = topic
     return d
 
 
@@ -79,3 +83,62 @@ class TestGather:
         with patch.object(m.discovery, 'build', return_value=pubsub):
             m.gather('p', MagicMock(), writer)
         writer.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_cmek_topic_produces_a_uses_cmek_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        topic = _topic(kms_key=kms_key)
+        pubsub = _pubsub_client(topics=[topic])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='pubsub_topic', from_id=topic['name'],
+            to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek',
+        )
+
+    def test_a_google_managed_topic_produces_no_edge(self):
+        pubsub = _pubsub_client(topics=[_topic()])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_subscription_produces_a_subscribes_to_edge(self):
+        sub = _sub(topic='projects/p/topics/t1')
+        pubsub = _pubsub_client(subs=[sub])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_called_once_with(
+            from_type='pubsub_subscription', from_id=sub['name'],
+            to_type='pubsub_topic', to_id='projects/p/topics/t1', relationship='subscribes_to',
+        )
+
+    def test_a_subscription_to_a_deleted_topic_produces_no_edge(self):
+        sub = _sub(topic='_deleted-topic_')
+        pubsub = _pubsub_client(subs=[sub])
+        writer = MagicMock()
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_topic_produces_no_edge(self):
+        kms_key = 'projects/p/locations/us/keyRings/r/cryptoKeys/k'
+        topic = _topic(kms_key=kms_key, labels={'lensix-suppress': 'true'})
+        pubsub = _pubsub_client(topics=[topic])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_subscription_produces_no_edge(self):
+        sub = _sub(topic='projects/p/topics/t1', labels={'lensix-suppress': 'true'})
+        pubsub = _pubsub_client(subs=[sub])
+        writer = MagicMock()
+        writer.add_resource.return_value = False
+        with patch.object(m.discovery, 'build', return_value=pubsub):
+            m.gather('p', MagicMock(), writer)
+        writer.add_edge.assert_not_called()

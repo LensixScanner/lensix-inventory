@@ -42,7 +42,7 @@ def gather(project_id, credentials, writer):
             continue
 
         region = (dataset.get('location') or 'global').lower()
-        writer.add_resource(
+        recorded = writer.add_resource(
             resource_type='bigquery_dataset',
             region=region,
             resource_id=dataset_id,
@@ -50,3 +50,14 @@ def gather(project_id, credentials, writer):
             raw=dataset,
             tags=dataset.get('labels'),
         )
+        if recorded:
+            # defaultEncryptionConfiguration.kmsKeyName is always the
+            # fully-qualified KMS resource name
+            # (projects/*/locations/*/keyRings/*/cryptoKeys/*, confirmed
+            # against the real discovery document schema) — unlike a
+            # Compute Engine network reference, this always matches
+            # kms_crypto_key's own resource_id exactly, no name-based
+            # resolution needed.
+            kms_key = (dataset.get('defaultEncryptionConfiguration') or {}).get('kmsKeyName')
+            if kms_key:
+                writer.add_edge(from_type='bigquery_dataset', from_id=dataset_id, to_type='kms_crypto_key', to_id=kms_key, relationship='uses_cmek')

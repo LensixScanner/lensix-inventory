@@ -14,6 +14,17 @@ than evaluated inline. Firewall rules get their own resource type
 reported against individual rules by their own ARM id, not just against
 the parent server.
 
+Edges: sql_server -> subnet (in_subnet), one per VNet service-endpoint
+rule (`virtual_network_rules.list_by_server`) — a genuinely new API call
+(mirroring the existing firewall_rules fetch above exactly), not derived
+from data already gathered elsewhere. Unlike firewall rules, VNet rules
+get no resource type of their own (nothing in scanner-light evaluates a
+per-rule finding against them the way public-firewall-rule findings need
+firewall rules as individually-addressable resources) — just the edge.
+The subnet endpoint is owned by network.py's own gather(), a separate
+module/container, so this is emitted as read (see network.py's own
+docstring for this pattern).
+
 Requires: azure-mgmt-sql.
 """
 
@@ -49,6 +60,12 @@ def get_firewall_rules(credential, subscription_id, rg, server_name):
     return list(sql_client.firewall_rules.list_by_server(rg, server_name))
 
 
+def get_vnet_rules(credential, subscription_id, rg, server_name):
+    from azure.mgmt.sql import SqlManagementClient
+    sql_client = SqlManagementClient(credential, subscription_id)
+    return list(sql_client.virtual_network_rules.list_by_server(rg, server_name))
+
+
 def gather(credential, subscription_id, writer):
     try:
         servers = get_servers(credential, subscription_id)
@@ -64,7 +81,7 @@ def gather(credential, subscription_id, writer):
         raw['_SecurityAlertPolicy'] = get_security_alert_policy(credential, subscription_id, rg, server.name)
         raw['_AuditingPolicy'] = get_auditing_policy(credential, subscription_id, rg, server.name)
         server_tags = raw.get('tags')
-        writer.add_resource(
+        added = writer.add_resource(
             resource_type='sql_server',
             region=region,
             resource_id=server.id,
@@ -73,6 +90,15 @@ def gather(credential, subscription_id, writer):
             raw=raw,
             tags=server_tags,
         )
+
+        if added:
+            try:
+                for vnet_rule in get_vnet_rules(credential, subscription_id, rg, server.name):
+                    subnet_id = vnet_rule.virtual_network_subnet_id
+                    if subnet_id:
+                        writer.add_edge(from_type='sql_server', from_id=server.id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
+            except Exception as e:
+                writer.add_error(region=region, source=f'sql:vnet_rules:{server.name}', message=e)
 
         try:
             rules = get_firewall_rules(credential, subscription_id, rg, server.name)

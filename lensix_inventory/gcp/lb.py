@@ -13,7 +13,7 @@ server-side.
 
 from googleapiclient import discovery
 
-from . import _util
+from . import _util, vpc
 
 
 def _region_from_self_link(self_link):
@@ -63,31 +63,58 @@ def gather(project_id, credentials, writer):
     # architectural N/A, same class as kms.py's own KeyRing.
     compute = discovery.build('compute', 'v1', credentials=credentials)
 
+    # BackendService.network is documented only as "The URL of the
+    # network..." (confirmed against the real discovery document schema)
+    # — same ambiguous full/partial/bare-name convention as every other
+    # Compute Engine reference field, resolved via vpc.py's own exported
+    # name -> selfLink map for the same reason as compute.py's own
+    # gather() (see its comment) — an accepted, disclosed duplicate of the
+    # same list call vpc.py's own gather() already makes elsewhere in the
+    # same scan, isolated so a resolution failure doesn't block backend
+    # service gathering itself.
+    try:
+        network_id_by_name = vpc.get_network_selflink_by_name(compute, project_id)
+    except Exception as e:
+        writer.add_error(region='global', source='lb_backend_service (network resolution)', message=e)
+        network_id_by_name = {}
+
     try:
         for backend in get_backend_services(compute, project_id):
             name = backend.get('name', '')
             region = _region_from_self_link(backend.get('selfLink', ''))
-            writer.add_resource(
+            backend_id = backend.get('selfLink', name)
+            recorded = writer.add_resource(
                 resource_type='lb_backend_service',
                 region=region,
-                resource_id=backend.get('selfLink', name),
+                resource_id=backend_id,
                 resource_name=name,
                 scope_id=_util.extract_network_name(backend.get('network')),
                 raw=backend,
             )
+            if recorded:
+                network_id = network_id_by_name.get(_util.extract_network_name(backend.get('network')))
+                if network_id:
+                    writer.add_edge(from_type='lb_backend_service', from_id=backend_id, to_type='vpc_network', to_id=network_id, relationship='in_vpc_network')
     except Exception as e:
         writer.add_error(region='global', source='lb_backend_service', message=e)
 
+    # ssl_policy is gathered before target_https_proxy (not its original
+    # position, which was already this order) so this map is ready before
+    # target_https_proxy needs it below.
+    ssl_policy_id_by_name = {}
     try:
         for ssl_policy in get_ssl_policies(compute, project_id):
             name = ssl_policy.get('name', '')
-            writer.add_resource(
+            policy_id = ssl_policy.get('selfLink', name)
+            recorded = writer.add_resource(
                 resource_type='ssl_policy',
                 region='global',
-                resource_id=ssl_policy.get('selfLink', name),
+                resource_id=policy_id,
                 resource_name=name,
                 raw=ssl_policy,
             )
+            if recorded:
+                ssl_policy_id_by_name[name] = policy_id
     except Exception as e:
         writer.add_error(region='global', source='ssl_policy', message=e)
 
@@ -95,12 +122,22 @@ def gather(project_id, credentials, writer):
         for proxy in get_target_https_proxies(compute, project_id):
             name = proxy.get('name', '')
             region = _region_from_self_link(proxy.get('selfLink', ''))
-            writer.add_resource(
+            proxy_id = proxy.get('selfLink', name)
+            recorded = writer.add_resource(
                 resource_type='target_https_proxy',
                 region=region,
-                resource_id=proxy.get('selfLink', name),
+                resource_id=proxy_id,
                 resource_name=name,
                 raw=proxy,
             )
+            if recorded:
+                # TargetHttpsProxy.sslPolicy is likewise only documented
+                # as "URL of SslPolicy resource..." — same resolution
+                # need as the network edge above, this time via a purely
+                # local map (ssl_policy is gathered by this same function,
+                # no cross-module fetch needed).
+                policy_id = ssl_policy_id_by_name.get(_util.extract_resource_name(proxy.get('sslPolicy')))
+                if policy_id:
+                    writer.add_edge(from_type='target_https_proxy', from_id=proxy_id, to_type='ssl_policy', to_id=policy_id, relationship='uses_ssl_policy')
     except Exception as e:
         writer.add_error(region='global', source='target_https_proxy', message=e)

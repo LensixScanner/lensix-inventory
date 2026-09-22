@@ -101,3 +101,40 @@ class TestGather:
         with patch('azure.mgmt.resource.ResourceManagementClient', return_value=resource_client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def _gather(self, rg, lock, w=None):
+        w = w or MagicMock()
+        resource_client = MagicMock()
+        resource_client.resource_groups.list.return_value = [rg]
+        locks_client = MagicMock()
+        locks_client.management_locks.list_at_resource_group_level.return_value = [lock]
+        with patch('azure.mgmt.resource.ResourceManagementClient', return_value=resource_client), \
+             patch('azure.mgmt.resource.locks.ManagementLockClient', return_value=locks_client):
+            m.gather('cred', 'sub-1', w)
+        return w
+
+    def test_a_lock_gets_a_protects_edge_to_its_resource_group(self):
+        rg = _rg()
+        lock = _lock()
+        w = self._gather(rg, lock)
+        w.add_edge.assert_called_once_with(
+            from_type='management_lock', from_id=lock.id, to_type='resource_group', to_id=rg.id, relationship='protects',
+        )
+
+    def test_a_fully_suppressed_lock_gets_no_edge(self):
+        rg = _rg()
+        lock = _lock()
+        w = MagicMock()
+        w.add_resource.side_effect = lambda **kw: kw['resource_type'] != 'management_lock'
+        self._gather(rg, lock, w=w)
+        w.add_edge.assert_not_called()
+
+    def test_a_lock_in_a_fully_suppressed_resource_group_gets_no_edge(self):
+        rg = _rg()
+        lock = _lock()
+        w = MagicMock()
+        w.add_resource.side_effect = lambda **kw: kw['resource_type'] != 'resource_group'
+        self._gather(rg, lock, w=w)
+        w.add_edge.assert_not_called()

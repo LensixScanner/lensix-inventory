@@ -42,7 +42,7 @@ so there's nothing time-windowed to skip.
 
 from googleapiclient import discovery
 
-from . import _util
+from . import _util, vpc
 from ..common.secrets import scan_text_for_secrets
 
 
@@ -338,6 +338,28 @@ def gather(project_id, credentials, writer):
         writer.add_error(region='global', source='compute_instance', message=e)
         instances = []
 
+    # A network interface's own `network`/`subnetwork` reference field is
+    # only DOCUMENTED to accept a full, partial, or bare-name form
+    # (confirmed against the real discovery document schema) — not
+    # guaranteed byte-identical to the referenced vpc_network/subnet's own
+    # selfLink (used as its resource_id), so these can't just be reused
+    # directly as an edge's to_id. Resolved via vpc.py's own exported
+    # name/key -> selfLink maps instead (see vpc.py's own gather() comment
+    # for the full rationale) — an accepted, disclosed duplicate of the
+    # same two list calls vpc.py's own gather() already makes elsewhere in
+    # the same scan, isolated so a failure resolving either doesn't block
+    # instance gathering itself.
+    try:
+        network_id_by_name = vpc.get_network_selflink_by_name(compute, project_id)
+    except Exception as e:
+        writer.add_error(region='global', source='compute_instance (network resolution)', message=e)
+        network_id_by_name = {}
+    try:
+        subnet_id_by_key = vpc.get_subnet_selflink_by_key(compute, project_id)
+    except Exception as e:
+        writer.add_error(region='global', source='compute_instance (subnet resolution)', message=e)
+        subnet_id_by_key = {}
+
     for inst in instances:
         if inst.get('status') in ('TERMINATED', 'SUSPENDED'):
             continue
@@ -349,16 +371,33 @@ def gather(project_id, credentials, writer):
             raw['metadata'] = {**raw['metadata'], 'itemKeys': key_names, 'itemValues': relevant_values}
             raw['metadata'].pop('items', None)
 
-        writer.add_resource(
+        instance_id = inst.get('selfLink', inst['name'])
+        recorded = writer.add_resource(
             resource_type='compute_instance',
             region=zone,
-            resource_id=inst.get('selfLink', inst['name']),
+            resource_id=instance_id,
             resource_name=inst['name'],
             scope_id=_instance_network(inst),
             raw=raw,
             secret_scan_hits=secret_hits,
             tags=raw.get('labels'),
         )
+        if not recorded:
+            continue
+        # One edge per network interface -- unlike scope_id (a single
+        # display value, so only the first interface's network is used),
+        # an instance can genuinely be multi-homed across more than one
+        # VPC network, and each is a real fact worth surfacing.
+        for iface in inst.get('networkInterfaces', []):
+            network_id = network_id_by_name.get(_util.extract_network_name(iface.get('network')))
+            if network_id:
+                writer.add_edge(from_type='compute_instance', from_id=instance_id, to_type='vpc_network', to_id=network_id, relationship='in_vpc_network')
+            subnet_ref = iface.get('subnetwork')
+            if subnet_ref:
+                subnet_key = (_util.extract_subnet_region(subnet_ref) or zone.rsplit('-', 1)[0], _util.extract_network_name(subnet_ref))
+                subnet_id = subnet_id_by_key.get(subnet_key)
+                if subnet_id:
+                    writer.add_edge(from_type='compute_instance', from_id=instance_id, to_type='subnet', to_id=subnet_id, relationship='in_subnet')
 
     # --- Custom images (IAM policy merged in, like aws/s3.py's per-bucket fan-out merge) ---
     try:

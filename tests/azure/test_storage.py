@@ -12,12 +12,16 @@ from unittest.mock import MagicMock, patch
 import lensix_inventory.azure.storage as m
 
 
-def _account(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Storage/storageAccounts/sa1', name='sa1'):
+def _account(location='eastus', rid='/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Storage/storageAccounts/sa1', name='sa1',
+             vnet_rule_subnet_ids=None):
     account = MagicMock()
     account.location = location
     account.id = rid
     account.name = name
-    account.as_dict.return_value = {'id': rid, 'name': name}
+    raw = {'id': rid, 'name': name}
+    if vnet_rule_subnet_ids is not None:
+        raw['network_rule_set'] = {'virtual_network_rules': [{'virtual_network_resource_id': sid} for sid in vnet_rule_subnet_ids]}
+    account.as_dict.return_value = raw
     return account
 
 
@@ -58,3 +62,41 @@ class TestGather:
         with patch('azure.mgmt.storage.StorageManagementClient', return_value=client):
             m.gather('cred', 'sub-1', w)
         w.add_resource.assert_not_called()
+
+
+class TestGatherEdges:
+    def test_a_vnet_rule_gets_an_in_subnet_edge(self):
+        w = MagicMock()
+        account = _account(vnet_rule_subnet_ids=['subnet-1'])
+        client = _storage_client([account])
+        with patch('azure.mgmt.storage.StorageManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_called_once_with(
+            from_type='storage_account', from_id=account.id, to_type='subnet', to_id='subnet-1', relationship='in_subnet',
+        )
+
+    def test_multiple_vnet_rules_each_get_their_own_edge(self):
+        w = MagicMock()
+        account = _account(vnet_rule_subnet_ids=['subnet-1', 'subnet-2'])
+        client = _storage_client([account])
+        with patch('azure.mgmt.storage.StorageManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        to_ids = {c.kwargs['to_id'] for c in w.add_edge.call_args_list}
+        assert to_ids == {'subnet-1', 'subnet-2'}
+
+    def test_no_vnet_rules_gets_no_edges(self):
+        w = MagicMock()
+        account = _account()
+        client = _storage_client([account])
+        with patch('azure.mgmt.storage.StorageManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
+
+    def test_a_fully_suppressed_account_gets_no_edges(self):
+        w = MagicMock()
+        w.add_resource.return_value = False
+        account = _account(vnet_rule_subnet_ids=['subnet-1'])
+        client = _storage_client([account])
+        with patch('azure.mgmt.storage.StorageManagementClient', return_value=client):
+            m.gather('cred', 'sub-1', w)
+        w.add_edge.assert_not_called()
