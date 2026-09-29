@@ -1,19 +1,19 @@
 name: Tag Release
 
-# Keeps git tags in sync with pyproject.toml's own version field — the
-# single source of truth for the version number lives in one place
-# (pyproject.toml), and this workflow is what turns a version bump there
-# into the actual `vX.Y.Z` tag that lensix-scanner-light's
-# requirements.txt files (and anyone else installing straight from a
-# GitHub tarball URL) pin against. Runs only when pyproject.toml itself
-# changes, and is a no-op if that version's tag already exists (e.g. a
-# push to main that didn't bump the version).
+# Keeps git tags in sync with lensix_inventory/__init__.py's __version__ —
+# the single source of truth for the version number (pyproject.toml reads
+# it from there via [tool.setuptools.dynamic]), and this workflow is what
+# turns a version bump there into the actual `vX.Y.Z` tag that
+# lensix-scanner-light's requirements.txt files (and anyone else
+# installing straight from a GitHub tarball URL) pin against. Runs only
+# when that file changes, and is a no-op if that version's tag already
+# exists (e.g. a push to main that didn't bump the version).
 
 on:
   push:
     branches: [main]
     paths:
-      - pyproject.toml
+      - lensix_inventory/__init__.py
 
 permissions:
   contents: write
@@ -25,10 +25,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Read version from pyproject.toml
+      - name: Read version from lensix_inventory/__init__.py
         id: version
         run: |
-          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          # Parsed with ast rather than imported, so this keeps working even
+          # if the package's __init__ ever grows imports of third-party deps.
+          VERSION=$(python3 -c "import ast; print(next(n.value.value for n in ast.parse(open('lensix_inventory/__init__.py').read()).body if isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == '__version__' for t in n.targets)))")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this version is already tagged
