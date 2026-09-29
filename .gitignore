@@ -4,5 +4,8 @@ __pycache__/
 venv/
 *.ndjson.gz
 *.ndjson
+# Sample inventories are committed on purpose.
+!samples/**/*.ndjson
+!samples/**/*.ndjson.gz
 .env
 *.egg-info/
