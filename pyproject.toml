@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lensix-inventory"
-version = "0.10.0"
+dynamic = ["version"]
 description = "Gather an AWS/Azure/GCP account inventory and upload it to Lensix, or self-host as a scheduled container — without ever giving Lensix live access to your cloud account."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -140,6 +140,12 @@ test = [
 
 [project.scripts]
 lensix-inventory = "lensix_inventory.cli:main"
+
+[tool.setuptools.dynamic]
+# Single source of truth is lensix_inventory/__init__.py: run.sh and the
+# Docker image run the package from source without installing it, so the
+# version must live in the package itself, not only in installed metadata.
+version = { attr = "lensix_inventory.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["lensix_inventory*"]
