@@ -7,12 +7,25 @@ Access key age, last console login, MFA status, and similar per-user
 security signals are all derived from the IAM credential report — a
 stateful generate-then-poll workflow (generate_credential_report, then
 poll get_credential_report until ready) rather than a simple
-list/describe call. It's fetched once per gather() call (not once per
-user — the report already covers every IAM user in the account in one
-CSV) and each user's own row is merged into that user's raw record as
-`_CredentialReport` (None if the report never became ready, or if this
-particular user has no row — e.g. `<root_account>`, which isn't a
-`list_users()` result and is dropped rather than merged into anything).
+list/describe call. The actual live fetch lives in
+common/credential_report.py, shared with account.py's own root-row need
+for the identical report — see that module's docstring for why. It's
+fetched at most once per gather() call (not once per user — the report
+already covers every IAM user in the account in one CSV, and a caller
+gathering account.py's gather_global() in the same process can pass its
+own already-fetched copy in via `credential_report_content` instead of
+letting this module fetch a second, redundant copy) and each user's own
+row is merged into that user's raw record as `_CredentialReport` (None
+if the report never became ready, or if this particular user has no row
+— e.g. `<root_account>`, which isn't a `list_users()` result and is
+dropped rather than merged into anything).
+
+Per-user fan-out (attached policies, group membership, the escalation
+simulation, tags — 4 API calls per user) runs concurrently via
+common/concurrency.py's parallel_map, the same pattern
+account.py uses for its own per-resource loops — these are independent,
+read-only calls per user, so there's no ordering dependency between
+users to preserve.
 
 This is also the sole owner of the `iam_user` resource type in this tool
 (account.py covers every other IAM/account-security resource type, but
@@ -24,11 +37,10 @@ credential report row, and a privilege-escalation policy simulation
 user, matching s3.py's fused fan-out pattern.
 """
 
-import csv
-import io
-import time
-
 import boto3
+
+from lensix_inventory.common.concurrency import parallel_map
+from lensix_inventory.common.credential_report import fetch_credential_report_content, parse_credential_report_rows
 
 # Actions that allow privilege escalation if simulate_principal_policy
 # says a user can perform them — see get_escalation_actions()'s own
@@ -109,73 +121,66 @@ def get_user_tags(username):
     return tags
 
 
-def get_credential_report():
-    """Returns the raw CSV content as a string. A report generation task
-    already in progress (for this account, or a concurrent gather of it)
-    surfaces as LimitExceededException — expected, not a failure — so
-    that falls through to polling for the report already being
-    generated instead of failing outright. Raises TimeoutError if the
-    report never becomes ready within 15 retries (~30s)."""
-    iam = boto3.client('iam')
-    try:
-        iam.generate_credential_report()
-    except iam.exceptions.LimitExceededException:
-        pass
-    for _ in range(15):
-        try:
-            resp = iam.get_credential_report()
-            return resp['Content'].decode('utf-8')
-        except iam.exceptions.CredentialReportNotReadyException:
-            time.sleep(2)
-    raise TimeoutError('Credential report not ready after 15 retries')
-
-
-def parse_credential_report(content):
-    reader = csv.DictReader(io.StringIO(content))
-    return list(reader)
-
-
-def get_credential_report_by_username():
-    content = get_credential_report()
-    rows = parse_credential_report(content)
+def get_credential_report_by_username(credential_report_content=None):
+    """`credential_report_content`, when given, is an already-fetched
+    report (e.g. account.py's gather_global() fetched one for the root
+    row in the same process) — parsed directly, skipping this module's
+    own live fetch. Omitted (the default), this fetches its own copy, so
+    this function stays independently callable."""
+    content = credential_report_content if credential_report_content is not None else fetch_credential_report_content()
+    rows = parse_credential_report_rows(content)
     # <root_account> has its own row but is never a list_users() result —
     # nothing to merge it into.
     return {row['user']: row for row in rows if row.get('user') != '<root_account>'}
 
 
-def gather(writer):
+def _gather_one_user(user):
+    """Fetches the per-user fan-out (policies, groups, escalation sim,
+    tags) for one user, returning (raw, tags, errors) rather than raising
+    or touching the writer directly — this runs inside parallel_map's
+    thread pool, and InventoryWriter isn't thread-safe, so every thread
+    must finish before anything gets written. `errors` is a list (not a
+    single value) since the two try/excepts below are independent and
+    both can fail for the same user."""
+    username = user['UserName']
+    arn = user['Arn']
+    raw = dict(user)
+    errors = []
+
     try:
-        report_by_username = get_credential_report_by_username()
+        raw['_AttachedPolicies'] = get_attached_user_policies(username)
+        raw['_Groups'] = get_groups_for_user(username)
+    except Exception as e:
+        errors.append((f'iam_user:{arn}', e))
+        raw.setdefault('_AttachedPolicies', [])
+        raw.setdefault('_Groups', [])
+
+    try:
+        raw['_EscalationActions'] = get_escalation_actions(arn)
+    except Exception as e:
+        errors.append((f'iam_user (escalation simulation:{arn})', e))
+        raw['_EscalationActions'] = []
+
+    return raw, get_user_tags(username), errors
+
+
+def gather(writer, credential_report_content=None):
+    try:
+        report_by_username = get_credential_report_by_username(credential_report_content)
     except Exception as e:
         writer.add_error(region='global', source='iam_user (credential report)', message=e)
         report_by_username = {}
 
-    for user in get_users():
-        username = user['UserName']
-        arn = user['Arn']
-
-        raw = dict(user)
-        try:
-            raw['_AttachedPolicies'] = get_attached_user_policies(username)
-            raw['_Groups'] = get_groups_for_user(username)
-        except Exception as e:
-            writer.add_error(region='global', source=f'iam_user:{arn}', message=e)
-            raw.setdefault('_AttachedPolicies', [])
-            raw.setdefault('_Groups', [])
-
-        try:
-            raw['_EscalationActions'] = get_escalation_actions(arn)
-        except Exception as e:
-            writer.add_error(region='global', source=f'iam_user (escalation simulation:{arn})', message=e)
-            raw['_EscalationActions'] = []
-
-        raw['_CredentialReport'] = report_by_username.get(username)
-
+    users = get_users()
+    for raw, tags, errors in parallel_map(_gather_one_user, users):
+        for source, e in errors:
+            writer.add_error(region='global', source=source, message=e)
+        raw['_CredentialReport'] = report_by_username.get(raw['UserName'])
         writer.add_resource(
             resource_type='iam_user',
             region='global',
-            resource_id=arn,
-            resource_name=username,
+            resource_id=raw['Arn'],
+            resource_name=raw['UserName'],
             raw=raw,
-            tags=get_user_tags(username),
+            tags=tags,
         )
