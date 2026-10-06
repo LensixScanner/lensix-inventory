@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import lensix_inventory.aws.user as m
+import lensix_inventory.common.credential_report as credential_report_m
 
 
 class _LimitExceededException(Exception):
@@ -258,7 +259,7 @@ class TestGather:
         w = MagicMock()
         user = {'UserName': 'alice', 'Arn': 'arn:aws:iam::1:user/alice'}
         client = _iam_client([user], report_never_ready=True)
-        with patch.object(m.boto3, 'client', return_value=client), patch.object(m.time, 'sleep'):
+        with patch.object(m.boto3, 'client', return_value=client), patch.object(credential_report_m.time, 'sleep'):
             m.gather(w)
         assert any(c.kwargs['source'] == 'iam_user (credential report)' for c in w.add_error.call_args_list)
         _, kwargs = w.add_resource.call_args

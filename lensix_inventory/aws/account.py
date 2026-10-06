@@ -55,13 +55,14 @@ based on what AWS actually supports tagging:
     xray_encryption_config).
 """
 
-import csv
-import io
 import json
 import time
 
 import boto3
 import botocore
+
+from lensix_inventory.common.concurrency import parallel_map
+from lensix_inventory.common.credential_report import fetch_credential_report_content, parse_credential_report_rows
 
 
 def _try(fn, *args, **kwargs):
@@ -90,41 +91,52 @@ def get_iam_roles():
     return roles
 
 
+def _describe_one_iam_group(iam, group):
+    name = group['GroupName']
+    group['_Users'] = _try(iam.get_group, GroupName=name).get('Users', [])
+    group['_InlinePolicyNames'] = _try(iam.list_group_policies, GroupName=name).get('PolicyNames', [])
+    group['_AttachedPolicies'] = _try(iam.list_attached_group_policies, GroupName=name).get('AttachedPolicies', [])
+    return group
+
+
 def get_iam_groups():
     """list_groups, merged per-group with member users (get_group), inline
     policy names (list_group_policies), and attached managed policies —
-    covers empty-group and inline-policy evaluation."""
+    covers empty-group and inline-policy evaluation. The 3 calls/group are
+    independent and read-only, so the per-group merge runs concurrently
+    via parallel_map (same client, shared across threads — the standard
+    boto3 pattern for concurrent request volume)."""
     iam = boto3.client('iam')
     groups = []
     for page in iam.get_paginator('list_groups').paginate():
         groups.extend(page['Groups'])
 
-    for group in groups:
-        name = group['GroupName']
-        group['_Users'] = _try(iam.get_group, GroupName=name).get('Users', [])
-        group['_InlinePolicyNames'] = _try(iam.list_group_policies, GroupName=name).get('PolicyNames', [])
-        group['_AttachedPolicies'] = _try(iam.list_attached_group_policies, GroupName=name).get('AttachedPolicies', [])
-    return groups
+    return parallel_map(lambda group: _describe_one_iam_group(iam, group), groups)
+
+
+def _describe_one_iam_policy(iam, policy):
+    try:
+        doc = iam.get_policy_version(
+            PolicyArn=policy['Arn'],
+            VersionId=policy['DefaultVersionId'],
+        )['PolicyVersion']['Document']
+    except Exception:
+        doc = None
+    policy['_PolicyDocument'] = doc
+    return policy
 
 
 def get_iam_policies():
     """Customer-managed (Scope='Local') policies, merged with their default
-    version's policy document — needed for PassRole-privilege evaluation."""
+    version's policy document — needed for PassRole-privilege evaluation.
+    The per-policy get_policy_version call runs concurrently via
+    parallel_map (same client, shared across threads)."""
     iam = boto3.client('iam')
     policies = []
     for page in iam.get_paginator('list_policies').paginate(Scope='Local'):
         policies.extend(page['Policies'])
 
-    for policy in policies:
-        try:
-            doc = iam.get_policy_version(
-                PolicyArn=policy['Arn'],
-                VersionId=policy['DefaultVersionId'],
-            )['PolicyVersion']['Document']
-        except Exception:
-            doc = None
-        policy['_PolicyDocument'] = doc
-    return policies
+    return parallel_map(lambda policy: _describe_one_iam_policy(iam, policy), policies)
 
 
 def get_iam_server_certificates():
@@ -217,38 +229,41 @@ def get_sso_tags(instance_arn, resource_arn):
 
 # --- Regional fetchers ---
 
+def _describe_one_kms_key(kms, key):
+    key_id = key['KeyId']
+    try:
+        meta = kms.describe_key(KeyId=key_id)['KeyMetadata']
+    except Exception:
+        return None
+    if meta.get('KeyManager') == 'AWS':
+        return None
+    raw = dict(meta)
+    raw['_RotationStatus'] = _try(kms.get_key_rotation_status, KeyId=key_id)
+    raw['_Aliases'] = _try(kms.list_aliases, KeyId=key_id).get('Aliases', []) if meta.get('KeyState') != 'PendingDeletion' else []
+    policy_raw = _try(kms.get_key_policy, KeyId=key_id, PolicyName='default')
+    policy_doc = None
+    if isinstance(policy_raw, dict) and 'Policy' in policy_raw:
+        try:
+            policy_doc = json.loads(policy_raw['Policy'])
+        except Exception:
+            policy_doc = None
+    raw['_KeyPolicy'] = policy_doc
+    return raw
+
+
 def get_kms_keys(region):
     """list_keys, merged per (customer-managed) key with describe_key,
     key rotation status, key policy, and alias — covers key-rotation and
-    public/unused-key findings. AWS-managed keys are skipped via
-    `if meta.get('KeyManager') == 'AWS': continue`."""
+    public/unused-key findings. AWS-managed keys are skipped (the merge
+    returns None for them, filtered out below). The 4 calls/key run
+    concurrently via parallel_map (same client, shared across threads)."""
     kms = boto3.client('kms', region_name=region)
     keys = []
     for page in kms.get_paginator('list_keys').paginate():
         keys.extend(page['Keys'])
 
-    out = []
-    for key in keys:
-        key_id = key['KeyId']
-        try:
-            meta = kms.describe_key(KeyId=key_id)['KeyMetadata']
-        except Exception:
-            continue
-        if meta.get('KeyManager') == 'AWS':
-            continue
-        raw = dict(meta)
-        raw['_RotationStatus'] = _try(kms.get_key_rotation_status, KeyId=key_id)
-        raw['_Aliases'] = _try(kms.list_aliases, KeyId=key_id).get('Aliases', []) if meta.get('KeyState') != 'PendingDeletion' else []
-        policy_raw = _try(kms.get_key_policy, KeyId=key_id, PolicyName='default')
-        policy_doc = None
-        if isinstance(policy_raw, dict) and 'Policy' in policy_raw:
-            try:
-                policy_doc = json.loads(policy_raw['Policy'])
-            except Exception:
-                policy_doc = None
-        raw['_KeyPolicy'] = policy_doc
-        out.append(raw)
-    return out
+    out = parallel_map(lambda key: _describe_one_kms_key(kms, key), keys)
+    return [r for r in out if r is not None]
 
 
 def get_kms_key_tags(region, key_id):
@@ -269,12 +284,33 @@ def get_kms_key_tags(region, key_id):
     return tags
 
 
+def _describe_one_trail(ct, s3, trail):
+    arn = trail.get('TrailARN', trail.get('Name', ''))
+    trail['_EventSelectors'] = _try(ct.get_event_selectors, TrailName=arn)
+    trail['_TrailStatus'] = _try(ct.get_trail_status, Name=arn)
+
+    bucket = trail.get('S3BucketName')
+    if bucket:
+        trail['_BucketLogging'] = _try(s3.get_bucket_logging, Bucket=bucket)
+        policy_raw = _try(s3.get_bucket_policy, Bucket=bucket)
+        policy_doc = None
+        if isinstance(policy_raw, dict) and 'Policy' in policy_raw:
+            try:
+                policy_doc = json.loads(policy_raw['Policy'])
+            except Exception:
+                policy_doc = None
+        trail['_BucketPolicy'] = policy_doc
+        trail['_BucketPublicAccessBlock'] = _try(s3.get_public_access_block, Bucket=bucket)
+    return trail
+
+
 def get_cloudtrail_trails(region):
     """describe_trails, merged per trail with event selectors, trail
     status, and (for the trail's own S3 bucket) bucket logging/policy/
     public-access-block config — the same fused fan-out pattern as
     s3.py's get_bucket_metadata, covering trail-enabled, data-event, and
-    trail-bucket-security evaluation."""
+    trail-bucket-security evaluation. The up-to-5 calls/trail run
+    concurrently via parallel_map (same clients, shared across threads)."""
     ct = boto3.client('cloudtrail', region_name=region)
     s3 = boto3.client('s3')
     try:
@@ -282,24 +318,7 @@ def get_cloudtrail_trails(region):
     except Exception:
         return []
 
-    for trail in trails:
-        arn = trail.get('TrailARN', trail.get('Name', ''))
-        trail['_EventSelectors'] = _try(ct.get_event_selectors, TrailName=arn)
-        trail['_TrailStatus'] = _try(ct.get_trail_status, Name=arn)
-
-        bucket = trail.get('S3BucketName')
-        if bucket:
-            trail['_BucketLogging'] = _try(s3.get_bucket_logging, Bucket=bucket)
-            policy_raw = _try(s3.get_bucket_policy, Bucket=bucket)
-            policy_doc = None
-            if isinstance(policy_raw, dict) and 'Policy' in policy_raw:
-                try:
-                    policy_doc = json.loads(policy_raw['Policy'])
-                except Exception:
-                    policy_doc = None
-            trail['_BucketPolicy'] = policy_doc
-            trail['_BucketPublicAccessBlock'] = _try(s3.get_public_access_block, Bucket=bucket)
-    return trails
+    return parallel_map(lambda trail: _describe_one_trail(ct, s3, trail), trails)
 
 
 def get_trail_tags(region, trail_arn):
@@ -492,30 +511,19 @@ def get_eventbridge_rule_tags(region, rule_arn):
         return []
 
 
-def get_root_credential_report_row():
-    """Same generate-then-poll workflow as user.py's own
-    get_credential_report() (duplicated rather than shared — this module
-    and user.py are gathered by two separate live containers, so there's
-    no way to share the actual live call between them either way), but
-    only the `<root_account>` row is kept — user.py's own per-user merge
-    explicitly drops that row since root is never a list_users() result."""
-    iam = boto3.client('iam')
-    try:
-        iam.generate_credential_report()
-    except iam.exceptions.LimitExceededException:
-        pass
-    content = None
-    for _ in range(15):
-        try:
-            resp = iam.get_credential_report()
-            content = resp['Content'].decode('utf-8')
-            break
-        except iam.exceptions.CredentialReportNotReadyException:
-            time.sleep(2)
-    if content is None:
-        raise TimeoutError('Credential report not ready after 15 retries')
-    reader = csv.DictReader(io.StringIO(content))
-    for row in reader:
+def get_root_credential_report_row(credential_report_content=None):
+    """Same underlying report as user.py's own per-user rows (the live
+    generate-then-poll fetch itself lives in common/credential_report.py,
+    shared between both) — only the `<root_account>` row is kept here,
+    since user.py's own per-user merge explicitly drops that row (root is
+    never a list_users() result). `credential_report_content`, when
+    given, is an already-fetched report (e.g. gather_global()'s own caller
+    fetched one for user.py's gather() in the same process) — parsed
+    directly instead of fetching a second, redundant copy. Omitted (the
+    default), this fetches its own copy, so this function stays
+    independently callable."""
+    content = credential_report_content if credential_report_content is not None else fetch_credential_report_content()
+    for row in parse_credential_report_rows(content):
         if row.get('user') == '<root_account>':
             return row
     return None
@@ -523,11 +531,17 @@ def get_root_credential_report_row():
 
 # --- Gatherers ---
 
-def gather_global(writer, account_id, regions=None):
+def gather_global(writer, account_id, regions=None, credential_report_content=None):
     """Gathers account-wide IAM/SSO resources once (not per-region).
     Note: `iam_user` is deliberately NOT gathered here — user.py owns that
     resource type, to avoid gathering the same users twice; see user.py's
     docstring.
+
+    `credential_report_content`, when given, is passed straight through to
+    get_root_credential_report_row() — an already-fetched report (e.g. a
+    caller running this alongside user.py's own gather() in the same
+    process, as account_checks.py's scan_global() does) instead of this
+    function fetching a second, redundant copy of the identical report.
 
     Ten independent fetches — isolate each so one's failure doesn't
     discard the others. When `regions` is given, also re-fetches trails +
@@ -645,7 +659,7 @@ def gather_global(writer, account_id, regions=None):
                 )
 
     try:
-        root_row = get_root_credential_report_row()
+        root_row = get_root_credential_report_row(credential_report_content)
     except Exception as e:
         writer.add_error(region='global', source='account (root credential report)', message=e)
         root_row = None
@@ -697,7 +711,11 @@ def gather(region, writer):
     except Exception as e:
         writer.add_error(region=region, source='account (kms keys)', message=e)
         keys = []
-    for key in keys:
+    # InventoryWriter isn't thread-safe, so the tag fetches run concurrently
+    # first (pure reads, no writer access) and the actual writer.add_resource
+    # calls stay a plain sequential loop afterward.
+    key_tags = parallel_map(lambda key: get_kms_key_tags(region, key['KeyId']), keys)
+    for key, tags in zip(keys, key_tags):
         key_id = key['KeyId']
         name = key_id
         for alias in key.get('_Aliases', []):
@@ -705,7 +723,7 @@ def gather(region, writer):
             break
         writer.add_resource(
             resource_type='kms_key', region=region, resource_id=key_id,
-            resource_name=name, raw=key, tags=get_kms_key_tags(region, key_id),
+            resource_name=name, raw=key, tags=tags,
         )
 
     try:
@@ -713,12 +731,16 @@ def gather(region, writer):
     except Exception as e:
         writer.add_error(region=region, source='account (cloudtrail trails)', message=e)
         trails = []
-    for trail in trails:
+    trail_tags = parallel_map(
+        lambda trail: get_trail_tags(region, trail.get('TrailARN', trail.get('Name'))) if trail.get('TrailARN', trail.get('Name')) else None,
+        trails,
+    )
+    for trail, tags in zip(trails, trail_tags):
         arn = trail.get('TrailARN', trail.get('Name'))
         writer.add_resource(
             resource_type='cloudtrail_trail', region=region, resource_id=arn,
             resource_name=trail.get('Name', arn), raw=trail,
-            tags=get_trail_tags(region, arn) if arn else None,
+            tags=tags,
         )
 
     # Alarm coverage — metric filters (with their alarms resolved) for
@@ -816,13 +838,22 @@ def gather(region, writer):
     except Exception as e:
         writer.add_error(region=region, source='account (log groups)', message=e)
         log_groups = []
-    for lg in log_groups:
+    # The single biggest serial cost in this whole module on a real
+    # account: one list_tags_for_resource call per log group, purely for
+    # tag-based suppression -- an account with hundreds of log groups
+    # (common; see this module's own tests/real-world scan timings) spent
+    # hundreds of blocking round-trips here. Concurrent fetch first, same
+    # sequential-write-after pattern as the KMS/CloudTrail loops above.
+    log_group_tags = parallel_map(
+        lambda lg: get_log_group_tags(region, lg.get('arn') or lg.get('logGroupArn')) if (lg.get('arn') or lg.get('logGroupArn')) else None,
+        log_groups,
+    )
+    for lg, tags in zip(log_groups, log_group_tags):
         name = lg.get('logGroupName')
-        arn = lg.get('arn') or lg.get('logGroupArn')
         writer.add_resource(
             resource_type='cloudwatch_log_group', region=region, resource_id=name,
             resource_name=name, raw=lg,
-            tags=get_log_group_tags(region, arn) if arn else None,
+            tags=tags,
         )
 
     try:
