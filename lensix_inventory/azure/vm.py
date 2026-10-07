@@ -83,6 +83,21 @@ isolated in its own try/except, same "indeterminate, don't guess"
 discipline as `_ProtectedByAzureBackup` and AWS's own `_HasScheduledAction`
 (`lensix_inventory/aws/autoscaling.py`).
 
+`_ProtectedByDeletionLock` (True/False/None) — Azure has no per-VM
+"deletion protection" API flag the way AWS (disableApiTermination) and
+GCP (deletionProtection) do; the equivalent is a `CanNotDelete`/`ReadOnly`
+management lock (Microsoft.Authorization/locks) applied directly to the
+VM, to its resource group, or to the subscription (any of the three
+protects it — ARM locks inherit downward). Every deletion-capable lock in
+the subscription is fetched ONCE via authorization.get_management_locks()
+BEFORE the VM loop below (same "per-management-object, not per-leaf-
+resource" cost discipline as the Backup lookup above), each one's own
+`.id` turned into the exact scope it covers via authorization.lock_scope(),
+and a VM is considered protected if its own resource id, its resource
+group's id, or the subscription's own id is in that scope set. None means
+the lock lookup itself failed, same "indeterminate, don't guess"
+discipline as every other governance-object signal in this module.
+
 Edges: vm -> network_interface (attached_to_nic), one per
 network_profile.network_interfaces[] entry — the network_interface
 endpoint itself is owned by defender.py's own gather() (see this same
@@ -90,18 +105,24 @@ docstring's NIC-ownership note above), not this module.
 recovery_services_vault -> vm (protects) is also emitted here (not by
 rsv.py's own gather()) — see rsv.get_protected_vm_resource_ids()'s own
 docstring for why: this module's own per-vault Backup lookup is the only
-place that knows WHICH vault protects a given VM.
+place that knows WHICH vault protects a given VM. management_lock -> vm
+(protects) follows the identical reasoning for deletion locks — this
+module's own scope-matching above is the only place that knows WHICH
+lock (if any) protects a given VM; authorization.py's own gather() emits
+the lock's own `applies_to` resource_group edge when relevant, but has no
+way to know about VMs specifically (see authorization.py's own docstring).
 
 Requires: azure-mgmt-compute, azure-mgmt-recoveryservices,
 azure-mgmt-recoveryservicesbackup, azure-mgmt-maintenance,
-azure-mgmt-monitor.
+azure-mgmt-monitor, azure-mgmt-resource, azure-mgmt-authorization.
 """
 
 import base64
 
 from ..common.secrets import scan_text_for_secrets
-from ._util import resource_group as _resource_group
+from ._util import resource_group as _resource_group, normalize_id as _normalize_id
 from . import rsv as _rsv
+from . import authorization as _authorization
 
 def get_virtual_machines(credential, subscription_id):
     from azure.mgmt.compute import ComputeManagementClient
@@ -221,6 +242,22 @@ def gather(credential, subscription_id, writer):
         writer.add_error(region='global', source='vm:backup_protected_items', message=e)
         protected_vm_ids = None
 
+    # One subscription-wide management-lock lookup for the whole VM loop
+    # below, not one per VM — see module docstring's _ProtectedByDeletionLock
+    # section. `deletion_locks` keeps each lock's own id alongside its
+    # scope (needed for the management_lock -> vm edge below); the
+    # None-vs-empty-list distinction matches protected_vm_ids' own
+    # "indeterminate, don't guess" discipline just above.
+    try:
+        deletion_locks = [
+            (lock.id, _authorization.lock_scope(lock.id))
+            for lock in _authorization.get_management_locks(credential, subscription_id)
+            if getattr(lock, 'level', None) in _authorization.DELETION_LOCK_LEVELS
+        ]
+    except Exception as e:
+        writer.add_error(region='global', source='vm:management_locks', message=e)
+        deletion_locks = None
+
     for vm in vms:
         region = vm.location or 'global'
 
@@ -231,6 +268,25 @@ def gather(credential, subscription_id, writer):
         raw['_ProtectedByAzureBackup'] = (
             None if protected_vm_ids is None else (vm.id or '').lower() in protected_vm_ids
         )
+
+        # See module docstring's _ProtectedByDeletionLock section — a VM
+        # is protected if ANY deletion-capable lock's own scope is this
+        # VM itself, its resource group, or the subscription (ARM locks
+        # inherit downward). `matching_lock_ids` is kept (not just the
+        # boolean) so the edge loop below knows which lock(s) to link.
+        rg = _resource_group(vm.id)
+        rg_scope = _normalize_id(f'/subscriptions/{subscription_id}/resourceGroups/{rg}') if rg else None
+        sub_scope = _normalize_id(f'/subscriptions/{subscription_id}')
+        vm_scope = _normalize_id(vm.id)
+        if deletion_locks is None:
+            raw['_ProtectedByDeletionLock'] = None
+            matching_lock_ids = []
+        else:
+            matching_lock_ids = [
+                lock_id for lock_id, scope in deletion_locks
+                if scope and _normalize_id(scope) in (vm_scope, rg_scope, sub_scope)
+            ]
+            raw['_ProtectedByDeletionLock'] = bool(matching_lock_ids)
 
         # Maintenance Configuration assignment: a genuine per-VM live
         # call (see _has_maintenance_configuration_assignment's own
@@ -280,6 +336,8 @@ def gather(credential, subscription_id, writer):
                 nic_id = nic_ref.get('id')
                 if nic_id:
                     writer.add_edge(from_type='vm', from_id=vm.id, to_type='network_interface', to_id=nic_id, relationship='attached_to_nic')
+            for lock_id in matching_lock_ids:
+                writer.add_edge(from_type='authorization_lock', from_id=lock_id, to_type='vm', to_id=vm.id, relationship='protects')
 
     try:
         for disk in get_disks(credential, subscription_id):
