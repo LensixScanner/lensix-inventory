@@ -237,6 +237,137 @@ class TestGatherProtectedByAzureBackup:
         assert get_protected.call_args.kwargs['writer'] is w
 
 
+def _lock_obj(lock_id, level='CanNotDelete'):
+    lock = MagicMock()
+    lock.id = lock_id
+    lock.level = level
+    return lock
+
+
+class TestGatherProtectedByDeletionLock:
+    """gather()'s _ProtectedByDeletionLock stamping — Azure's equivalent
+    of AWS's disableApiTermination / GCP's deletionProtection is a
+    CanNotDelete/ReadOnly management lock on the VM itself, its resource
+    group, or the subscription."""
+
+    VM_ID = '/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Compute/virtualMachines/vm1'
+
+    def test_true_for_a_lock_directly_on_the_vm(self):
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj(f'{self.VM_ID}/providers/Microsoft.Authorization/locks/dont-delete')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is True
+
+    def test_true_for_a_lock_on_the_resource_group(self):
+        # Note: the lock's scope is built from subscription_id ('sub-1',
+        # the gather() argument below), NOT from the 's1' embedded in
+        # VM_ID's own resource path — vm.py computes rg_scope/sub_scope
+        # from its own subscription_id parameter, so this test's lock has
+        # to match that, same as the real gather() call always would.
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj('/subscriptions/sub-1/resourceGroups/my-rg/providers/Microsoft.Authorization/locks/dont-delete')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is True
+
+    def test_true_for_a_lock_on_the_subscription(self):
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj('/subscriptions/sub-1/providers/Microsoft.Authorization/locks/dont-delete')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is True
+
+    def test_false_for_a_lock_on_an_unrelated_resource_group(self):
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj('/subscriptions/s1/resourceGroups/other-rg/providers/Microsoft.Authorization/locks/dont-delete')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is False
+
+    def test_false_when_no_locks_exist(self):
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is False
+
+    def test_false_for_a_readonly_level_other_than_candelete_or_readonly(self):
+        # NotSpecified is a valid wire value but doesn't actually protect
+        # anything — only CanNotDelete/ReadOnly block deletion.
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj(f'{self.VM_ID}/providers/Microsoft.Authorization/locks/noop', level='NotSpecified')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is False
+
+    def test_none_when_the_lock_lookup_fails(self):
+        w = MagicMock()
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', side_effect=RuntimeError('AccessDenied')):
+            m.gather('cred', 'sub-1', w)
+        assert w.add_resource.call_args_list[0].kwargs['raw']['_ProtectedByDeletionLock'] is None
+        assert any(c.kwargs['source'] == 'vm:management_locks' for c in w.add_error.call_args_list)
+
+
+class TestGatherManagementLockEdges:
+    VM_ID = '/subscriptions/s1/resourceGroups/my-rg/providers/Microsoft.Compute/virtualMachines/vm1'
+
+    def test_emits_a_protects_edge_for_a_matching_lock(self):
+        w = MagicMock()
+        w.add_resource.return_value = True
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock_id = f'{self.VM_ID}/providers/Microsoft.Authorization/locks/dont-delete'
+        lock = _lock_obj(lock_id)
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        edge_calls = [c for c in w.add_edge.call_args_list if c.kwargs.get('relationship') == 'protects']
+        assert edge_calls == [
+            ((), {'from_type': 'authorization_lock', 'from_id': lock_id, 'to_type': 'vm', 'to_id': vm.id, 'relationship': 'protects'}),
+        ]
+
+    def test_no_protects_edge_when_no_lock_matches(self):
+        w = MagicMock()
+        w.add_resource.return_value = True
+        vm = _vm(rid=self.VM_ID)
+        client = _empty_client()
+        client.virtual_machines.list_all.return_value = [vm]
+        lock = _lock_obj('/subscriptions/s1/resourceGroups/other-rg/providers/Microsoft.Authorization/locks/dont-delete')
+        with patch('azure.mgmt.compute.ComputeManagementClient', return_value=client), \
+             patch.object(m._authorization, 'get_management_locks', return_value=[lock]):
+            m.gather('cred', 'sub-1', w)
+        assert not any(c.kwargs.get('relationship') == 'protects' for c in w.add_edge.call_args_list)
+
+
 class TestGatherMaintenanceConfigurationAssignment:
     """gather()'s _HasMaintenanceConfigurationAssignment stamping —
     Workstream 4. Only ever invoked for a VM already failing the static
